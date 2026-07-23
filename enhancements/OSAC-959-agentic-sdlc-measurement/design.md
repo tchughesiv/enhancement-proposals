@@ -20,7 +20,14 @@ superseded-by:
 
 ## Summary
 
-Build a phased measurement framework that scores the quality of AI-agent-driven planning and bug-fix work using a human-calibrated eval harness, then surfaces operational trends (MTTR, velocity) through the team's existing dashboard rather than a new one. See [PRD](prd.md) for detailed requirements.
+Build a phased measurement framework that scores the quality of AI-agent-driven planning and bug-fix work against human-validated reference cases, then surfaces operational trends (MTTR, velocity) through the team's existing Org Pulse dashboard rather than a new one. This gives engineering leadership a trustworthy, independently-calibrated signal for whether the agentic SDLC transition is actually working, instead of an unvalidated LLM-as-judge score taken at face value. See [PRD](prd.md) for detailed requirements.
+
+## Terminology
+
+- **Golden case / golden dataset:** a curated set of real, already-merged `enhancement-proposals` PRs (`evals/review/cases/`) with a human-authored `reference-review.md` and `annotations.yaml` — the fixed reference this design's judges score against.
+- **Judges:** the three scoring checks this design runs — `rubric_scoring` (deterministic, regex-parses the skill's own rubric table), `critical_findings_recall` (deterministic, fuzzy-matches annotated critical findings), and `qualitative_finding_quality` (LLM-as-judge, the only one affected by model choice).
+- **Calibration:** the process of checking that a judge's verdict agrees with a human reviewer's verdict on golden cases — the trust mechanism this design relies on instead of (or ahead of) model-family separation.
+- **`eval_run` / `ops_metrics`:** the two feed types in `evals/lib/*.schema.yaml` that everything downstream (Org Pulse, the weekly report) reads from — `eval_run` for judge/skill scoring results, `ops_metrics` for Jira/GitHub-sourced MTTR/velocity data.
 
 ## Motivation
 
@@ -182,6 +189,8 @@ There is no idempotency concern for read-only review evals — re-running the sa
 ### RBAC / Tenancy
 
 No RBAC or tenancy changes. This feature produces no new OSAC resources (CRDs, gRPC-managed objects) and has no tenant-observable behavior — confirmed during PRD clarification: its consumers are internal engineering roles (Lead Engineer, Product Owner, DevOps Engineer), not OSAC's tenant-facing personas. [Locked: D1] No `osac.openshift.io/tenant` or `osac.openshift.io/owner-reference` annotations apply because there is no tenant-scoped resource to annotate.
+
+The same no-tenant-surface reasoning means the Documentation, UI, and E2E Testing dimensions in `.design/context/osac-dimensions.md` don't apply either: there is no `osac-ui` console surface (Org Pulse is a separate internal tool, not `osac-ui`), no tenant-facing documentation need, and no `osac-test-infra` pytest coverage requirement — this design's own Test Plan is the equivalent verification layer for its actual (non-tenant) surface.
 
 ### Observability and Monitoring
 
