@@ -6,9 +6,11 @@
 | Jira        | [OSAC-959](https://redhat.atlassian.net/browse/OSAC-959) |
 | Date        | 2026-07-23 |
 
+*Scope note: this is an internal engineering-tooling PRD — it has no tenant-facing surface, and none of OSAC's four canonical personas or tenant-facing cross-cutting dimensions apply (see User Stories).*
+
 ## Problem Statement
 
-The team is transitioning bug-fix and feature-development workflows to an agentic (AI-agent-driven) SDLC, but has no quantitative way to know whether that transition is actually working. Today's only measurement is an FTPR (first-time-pass-rate) dashboard (`n8n-pulumi-poc`) that predates the agentic effort and wasn't designed to isolate agent-driven work from human-driven work. Without dedicated metrics for MTTR, RCA accuracy, and development velocity, engineering leadership, product owners, and DevOps engineers cannot tell whether AI agents are improving outcomes, holding steady, or introducing risk. Any automated scoring built to answer that question is itself unproven until it addresses a specific trust gap: nothing today prevents an LLM-as-judge from favoring output written in its own model family's style over output that is actually better. [Jira: OSAC-959] [Clarify: R2.Q1]
+The team is transitioning bug-fix and feature-development workflows to an agentic (AI-agent-driven) SDLC, but has no quantitative way to know whether that transition is actually working. Today's only measurement is an FTPR (first-time-pass-rate) dashboard (`n8n-pulumi-poc`, an existing internal automation pipeline) that predates the agentic effort and wasn't designed to isolate agent-driven work from human-driven work. Without dedicated metrics for MTTR, RCA accuracy, and development velocity, engineering leadership, product owners, and DevOps engineers cannot tell whether AI agents are improving outcomes, holding steady, or introducing risk. Any automated scoring built to answer that question is itself unproven until it addresses a specific trust gap: nothing today prevents an LLM-as-judge from favoring output written in its own model family's style over output that is actually better. [Jira: OSAC-959] [Clarify: R2.Q1]
 
 ## In Scope
 
@@ -17,7 +19,7 @@ The team is transitioning bug-fix and feature-development workflows to an agenti
 - A judge-model policy: LLM-as-judge scoring must be validated against human-authored reference cases before being trusted, with model-family separation from the skill under test as a low-cost supplementary hedge against same-model bias — not a substitute for that calibration. [Clarify: R2.Q1]
 - Extension of the existing Org Pulse dashboard with new tabs/data surfacing agent performance trends — not a new, standalone dashboard. [Clarify: R1.Q4]
 - A dedicated weekly automated reporting pipeline, sourced from this framework's own data feeds, distinct from existing personal-activity reporting tooling. [Clarify: R1.Q5]
-- Validation of the framework against real end-to-end use cases, delivered in phases: a human-validated planning-review golden set first, extended to real bug-fix outcomes once bug-fix evaluation is integrated. [Jira: OSAC-959]
+- Validation of the framework against real end-to-end use cases, delivered in phases (see Assumptions for the specific sequencing). [Jira: OSAC-959]
 - Per-run cost telemetry for eval/CI-review runs (what an automated review or eval invocation costs) as a distinct observability signal, separate from AI-usage billing. [Clarify: R1.Q3]
 
 ## Out of Scope
@@ -59,6 +61,6 @@ These personas are internal engineering roles who consume agentic-SDLC measureme
 ## Provenance
 
 Authored: revise @ prd 0.6.0 - 7b6dfe0, workspace OSAC-2264-review-harness-judges @ 6f530dcb
-Phases: draft, revise
+Phases: draft, revise, revise
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.0","ai_workflows":"7b6dfe0","source_repo":"6f530dcb","source_repo_branch":"OSAC-2264-review-harness-judges","commits_behind_main":0,"commits_ahead_main":6,"main_ref":"main","phases":["draft","revise"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.0","ai_workflows":"7b6dfe0","source_repo":"6f530dcb","source_repo_branch":"OSAC-2264-review-harness-judges","commits_behind_main":0,"commits_ahead_main":6,"main_ref":"main","phases":["draft","revise","revise"],"authoring_modes":["skill"],"context_changed":false} -->
