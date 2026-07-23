@@ -284,7 +284,16 @@ Largely not applicable — there is no multi-component cluster rollout to skew. 
 
 ## Infrastructure Needed
 
-None. This design reuses `osac-workspace`'s existing repo, existing GitHub Actions CI, and the existing Org Pulse / `org-pulse-data` pipeline. No new subproject, repository, or testing infrastructure is requested.
+**None for the current (local / CI-smoke-only) execution mode.** This design reuses `osac-workspace`'s existing repo, existing GitHub Actions CI (`evals-review-smoke.yml`, `workflow_dispatch`-only, no LLM calls), and the existing Org Pulse / `org-pulse-data` pipeline. No new subproject, repository, or testing infrastructure is requested for Phase 1–2 as scoped.
+
+**This changes if OSAC-3010 resolves toward Harbor or EvalHub remote execution.** Both are mature upstream (see Motivation, Risks), but neither reuses existing OSAC infrastructure — each has its own real footprint, per the harness's own deploy docs (`deploy/harbor/README.md`, `deploy/evalhub/README.md`):
+
+| Remote runner | New infrastructure required |
+|---|---|
+| Harbor (K8s/OpenShift) | A cluster namespace with RBAC to create trial Pods, ConfigMaps, and Secrets; a built + pushed container image (`deploy/Containerfile`); in-cluster credential provisioning for the LLM API key (static `Secret` or GCP Workload Identity); network egress from that namespace to the external LLM provider |
+| EvalHub | A running Red Hat OpenShift AI / TrustyAI EvalHub operator deployment (not assumed to already exist for OSAC); an internal image registry entry + pushed provider image; a ConfigMap-based provider registration in the TrustyAI namespace (admin-level — requires restarting the EvalHub pod); S3 bucket access for test-case delivery |
+
+Neither is a blocker to Phase 1–2 as scoped. But whichever OSAC-3010 selects needs its own infrastructure request as part of that decision — not assumed here, and not free by virtue of reusing "existing GitHub Actions CI" the way the local-execution mode does. See Open Question #2 (CI trigger scope) and Security Considerations (credential provisioning), both of which already defer to OSAC-3010 for the same reason.
 
 ---
 
