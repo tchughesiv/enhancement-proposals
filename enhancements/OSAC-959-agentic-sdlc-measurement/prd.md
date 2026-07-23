@@ -14,7 +14,7 @@ The team is transitioning bug-fix and feature-development workflows to an agenti
 
 - A documented measurement framework defining MTTR, RCA accuracy (indirect, via review-finding recall and bug-fix correctness scoring), and development velocity for agentic bug-fix and feature-development workflows. [Jira: OSAC-959]
 - Automated data collection from Jira and GitHub feeding that framework. [Jira: OSAC-959]
-- A judge-model policy: automated review/eval scoring must not be produced by a judge model sharing a model family with the skill it is grading, so reported metrics cannot be inflated by same-model self-preference bias. [Clarify: R2.Q1]
+- A judge-model policy: LLM-as-judge scoring must be validated against human-authored reference cases before being trusted, with model-family separation from the skill under test as a low-cost supplementary hedge against same-model bias — not a substitute for that calibration. [Clarify: R2.Q1]
 - Extension of the existing Org Pulse dashboard with new tabs/data surfacing agent performance trends — not a new, standalone dashboard. [Clarify: R1.Q4]
 - A dedicated weekly automated reporting pipeline, sourced from this framework's own data feeds, distinct from existing personal-activity reporting tooling. [Clarify: R1.Q5]
 - Validation of the framework against real end-to-end use cases, delivered in phases: a human-validated planning-review golden set first, extended to real bug-fix outcomes once bug-fix evaluation is integrated. [Jira: OSAC-959]
@@ -58,6 +58,7 @@ These personas are internal engineering roles who consume agentic-SDLC measureme
 
 ## Provenance
 
-Authored: draft @ prd 0.6.0 - 7b6dfe0, workspace OSAC-2264-review-harness-judges @ 6f530dcb
+Authored: revise @ prd 0.6.0 - 7b6dfe0, workspace OSAC-2264-review-harness-judges @ 6f530dcb
+Phases: draft, revise
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.0","ai_workflows":"7b6dfe0","source_repo":"6f530dcb","source_repo_branch":"OSAC-2264-review-harness-judges","commits_behind_main":0,"commits_ahead_main":6,"main_ref":"main","phases":["draft"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.0","ai_workflows":"7b6dfe0","source_repo":"6f530dcb","source_repo_branch":"OSAC-2264-review-harness-judges","commits_behind_main":0,"commits_ahead_main":6,"main_ref":"main","phases":["draft","revise"],"authoring_modes":["skill"],"context_changed":false} -->
