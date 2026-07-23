@@ -38,7 +38,7 @@ These personas are internal engineering roles who consume agentic-SDLC measureme
 
 ### Product Owner
 
-- As a product owner, I want data on feature development velocity with agents so that I can plan releases with a realistic sense of agent-assisted throughput. [Jira: OSAC-959]
+- As a product owner, I want to see cycle-time data — from Jira Task creation to merged PR — for agent-assisted feature work, so that I can plan releases with a realistic sense of agent-assisted throughput. [Jira: OSAC-959]
 
 ### DevOps Engineer
 
