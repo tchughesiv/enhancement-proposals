@@ -34,11 +34,11 @@ Four industry-standard components make up a production LLM/agent eval harness: a
 
 ### Goals
 
-- Adopt `agent-eval-harness`'s native case/judge patterns (`check` and LLM `prompt` judges, `thresholds`) for planning-phase review evals instead of building a parallel custom scoring engine. [Codebase: `AUDIT.md` §1, §"Recommended Plan Revisions"]
-- Establish a judge-model policy for LLM-as-judge scoring that is validated against human-authored reference cases, with model-family separation as a low-cost supplementary hedge. [PRD: In Scope — judge-model policy] [Locked: D7]
-- Extend the existing Org Pulse dashboard and `org-pulse-data` pipelines with new eval/ops trend data rather than building a parallel dashboard or a duplicate Jira/GitHub fetcher. [PRD: Dependencies — Org Pulse] [Locked: D4]
-- Ingest the external bugfix-evaluation harness's (OSAC-516) output for RCA-accuracy and bug-fix-outcome data rather than reimplementing bug-fix evaluation inside this workspace. [PRD: Dependencies — bugfix harness]
-- Land the required, blocking CI gate as the harness's fourth standard component once OSAC-3010 resolves the execution-mode question — not as an indefinitely-deferred nice-to-have.
+- **Skill regressions are caught before they reach production reviews.** Adopting `agent-eval-harness`'s native case/judge patterns (`check` and LLM `prompt` judges, `thresholds`) means a broken `prd-review`/`design-review` skill fails a local run before it ever scores a real PR. [Codebase: `AUDIT.md` §1, §"Recommended Plan Revisions"] (See Alternatives for why a custom scorer was rejected.)
+- **Engineers can trust that a reported score reflects human judgment, not just model self-consistency.** LLM-as-judge scoring is validated against human-authored reference cases before being treated as reliable, with model-family separation as a low-cost supplementary hedge. [PRD: In Scope — judge-model policy] [Locked: D7]
+- **Lead Engineer, Product Owner, and DevOps Engineer personas see agent performance trends in the same Org Pulse dashboard they already use daily** — no new tool to learn or check. [PRD: Dependencies — Org Pulse] [Locked: D4] (See Alternatives for why a standalone dashboard was rejected.)
+- **RCA-accuracy and bug-fix-outcome trends are visible without this workspace re-implementing bug-fix evaluation** — the external `osac-bugfix-eval` (OSAC-516) harness's output is ingested, not duplicated. [PRD: Dependencies — bugfix harness]
+- **A skill/rubric change that regresses quality is blocked from merging, not just flagged after the fact.** Once OSAC-3010 resolves the execution-mode question, the harness gains a required, blocking CI gate as its fourth standard component, rather than remaining an indefinitely-deferred nice-to-have.
 
 ### Non-Goals
 
@@ -147,11 +147,15 @@ Pass criteria include the skill's own zero-dimension auto-fail rule, not a loose
 
 The Phase 4 weekly report is a purpose-built pipeline reading the `eval_run`/`ops_metrics` feeds above — distinct from the workspace's unrelated `generate-status-report` skill, which produces a personal 1:1 activity digest from an individual's own PRs/Jira, not agent-performance-trend reporting. [Clarify: R1.Q5] [Locked: D5]
 
+**Schema shape.** `evals/lib/unified-report.schema.yaml` (`feed_type: eval_run`, already implemented) is a top-level report keyed by `run_id` and `timestamp`, containing a `workflows` array — one entry per `prd-review`/`design-review`/`bugfix` workflow, each with a `gate` name, a `pass`/`fail`/`partial`/`skipped` `result`, and a `cases` array of per-case `case_id`/`passed`/`verdict`/`scores` — plus an `aggregate` object with `overall_pass_rate`. Per-case cost/duration tracking already exists in this schema for the bugfix workflow (`run_result.cost_usd`, `num_turns`, `duration_s`) but is not yet populated for `prd-review`/`design-review` cases — Story 4.03 (per-run cost telemetry) extends this same `run_result` shape to the review workflows rather than adding a new field, keeping the schema addition additive as the PRD's cost-telemetry scope note requires. `evals/lib/ops-metrics-feed.schema.yaml` (`feed_type: ops_metrics`, Phase 3, not yet implemented) is expected to follow the same discriminator pattern with MTTR/velocity fields in place of `workflows`/`cases`; its exact shape is deferred to Epic 3 implementation, not fixed here.
+
 **Dependency detail beyond what's in the PRD:** OSAC-2007 (EP Review Data Pipeline) already dashboards the EP Review Bot's scores in Org Pulse today — Phase 4 must define the *delta* against that existing pipeline, not duplicate it. `osac-bugfix-eval` lives on a personal fork (`eranco74`) with no organizational backup and no commits since 2026-06-03; Epic 2's adapter work should include a liveness check before hard-wiring to it.
 
 ### Security Considerations
 
 The harness sends EP document content (PRD/design markdown, which may reference internal architecture and Jira ticket details) to an external LLM API (`opus-4.6`/`claude-sonnet-4-6` via the configured provider) as part of both the skill-under-test execution and the LLM `prompt` judge. This is the same data-exposure profile the EP Review Bot already has in production today — no new exposure is introduced, but it is worth stating explicitly since a naive reading of "internal tooling" might assume no external data leaves the workspace. No credentials, secrets, or tenant data pass through this path; the documents under review are the same PRDs/EPs already merged or under PR review in a repo the LLM provider's contract already covers for the bot.
+
+**Credential provisioning.** Local harness runs (`evals/review/run-eval.sh`, today's only execution path) authenticate to the LLM provider using the engineer's own already-configured Claude Code credentials — the same mechanism as any other Claude Code skill invocation in this workspace; this design provisions no new secret. The CI smoke check (`evals-review-smoke.yml`) stubs the API key and skips execution entirely (`--skip-execute --skip-score`), so no CI-scoped credential exists yet. Provisioning one is part of the OSAC-3010 decision, not a gap introduced by this design — see Risks, "No CI gate exists yet."
 
 `permissions.deny` in `eval-prd-review.yaml`/`eval-design-review.yaml` blocks the skill under test from making live calls to Jira or GitHub MCP tools during an eval run — the skill only ever sees the case's local input files, preventing an eval run from accidentally mutating a real Jira ticket or GitHub PR, or having its score depend on live external state that could change between runs.
 
@@ -286,7 +290,7 @@ None. This design reuses `osac-workspace`'s existing repo, existing GitHub Actio
 
 ## Provenance
 
-Authored: draft @ design 0.4.0 - 7b6dfe0, workspace OSAC-2264-review-harness-judges @ 6f530dcb
-Phases: revise, revise, draft
+Authored: revise @ design 0.4.0 - 7b6dfe0, workspace OSAC-2264-review-harness-judges @ 6f530dcb
+Phases: revise, revise, draft, revise
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"design","workflow_version":"0.4.0","ai_workflows":"7b6dfe0","source_repo":"6f530dcb","source_repo_branch":"OSAC-2264-review-harness-judges","commits_behind_main":0,"commits_ahead_main":6,"main_ref":"main","phases":["revise","revise","draft"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"design","workflow_version":"0.4.0","ai_workflows":"7b6dfe0","source_repo":"6f530dcb","source_repo_branch":"OSAC-2264-review-harness-judges","commits_behind_main":0,"commits_ahead_main":6,"main_ref":"main","phases":["revise","revise","draft","revise"],"authoring_modes":["skill"],"context_changed":false} -->
