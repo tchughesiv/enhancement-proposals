@@ -53,7 +53,6 @@ These personas are internal engineering roles who consume agentic-SDLC measureme
 
 - **Org Pulse dashboard (OSAC-2004):** Provides the dashboard surface this framework's trend data extends; must not duplicate EP Review Bot score visibility already dashboarded there (OSAC-2007). [Clarify: R1.Q4]
 - **Bug-fix evaluation harness (OSAC-516 / `eranco74/osac-bugfix-eval`):** Supplies the RCA-accuracy and bug-fix-outcome data this framework ingests rather than re-implementing; currently lives on a personal fork with no organizational backup. [Jira: OSAC-959]
-- **Execution-mode decision (OSAC-3010):** Whether eval and data-collection automation runs locally or via remote cluster-backed execution is not yet finalized. [Clarify: R2.Q2]
 - **Alignment sign-off (Eran Cohen):** Two program-level questions — comfortable with phased E2E validation and indirect RCA accuracy for this milestone, and whether Epic 3–4 priorities should shift — remain unanswered as of this PRD. [Clarify: R1.Q6]
 
 ---
