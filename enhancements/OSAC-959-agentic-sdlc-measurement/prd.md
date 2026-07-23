@@ -16,7 +16,7 @@ The team is transitioning bug-fix and feature-development workflows to an agenti
 
 - A documented measurement framework defining MTTR, RCA accuracy (indirect, via review-finding recall and bug-fix correctness scoring), and development velocity for agentic bug-fix and feature-development workflows. [Jira: OSAC-959]
 - Automated data collection from Jira and GitHub feeding that framework. [Jira: OSAC-959]
-- A judge-model policy: LLM-as-judge scoring must be validated against human-authored reference cases before being trusted, with model-family separation from the skill under test as a low-cost supplementary hedge against same-model bias — not a substitute for that calibration. [Clarify: R2.Q1]
+- A judge-model policy: any automated agent-performance score is only trusted once it has been shown to agree with a human reviewer's judgment on real, human-reviewed reference cases. A score that hasn't been checked this way is treated as unproven, not authoritative. [Clarify: R2.Q1]
 - Extension of the existing Org Pulse dashboard with new tabs/data surfacing agent performance trends — not a new, standalone dashboard. [Clarify: R1.Q4]
 - A dedicated weekly automated reporting pipeline, sourced from this framework's own data feeds, distinct from existing personal-activity reporting tooling. [Clarify: R1.Q5]
 - Validation of the framework against real end-to-end use cases, delivered in phases (see Assumptions for the specific sequencing). [Jira: OSAC-959]
