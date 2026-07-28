@@ -17,7 +17,7 @@ The team is transitioning bug-fix and feature-development workflows to an agenti
 - A documented measurement framework defining MTTR, RCA accuracy (indirect, via review-finding recall and bug-fix correctness scoring), and development velocity for agentic bug-fix and feature-development workflows. [Jira: OSAC-959]
 - Automated data collection from Jira and GitHub feeding that framework. [Jira: OSAC-959]
 - A judge-model policy: any automated agent-performance score is only trusted once it has been shown to agree with a human reviewer's judgment on real, human-reviewed reference cases. A score that hasn't been checked this way is treated as unproven, not authoritative. [Clarify: R2.Q1]
-- Extension of the existing Org Pulse dashboard with new tabs/data surfacing agent performance trends — not a new, standalone dashboard. [Clarify: R1.Q4]
+- Extension of the existing Org Pulse dashboard with new tabs/data surfacing agent-performance eval trends — not a new, standalone dashboard. [Clarify: R1.Q4] **(Revised 2026-07-28):** MTTR and velocity operational metrics are delivered as an agent-attribution extension to UOI's (Konflux DevLake) existing Issue Cycle Time/PR Cycle Time tabs instead — a second pre-existing dashboard, not a new one — per Eran Cohen's direction on [OSAC-2261](https://redhat.atlassian.net/browse/OSAC-2261). The weekly reporting pipeline below links both surfaces from one place; see Dependencies.
 - A dedicated weekly automated reporting pipeline, sourced from this framework's own data feeds, distinct from existing personal-activity reporting tooling. [Clarify: R1.Q5]
 - Validation of the framework against real end-to-end use cases, delivered in phases (see Assumptions for the specific sequencing). [Jira: OSAC-959]
 - Per-run cost telemetry for eval/CI-review runs (what an automated review or eval invocation costs) as a distinct observability signal, separate from AI-usage billing. [Clarify: R1.Q3]
@@ -51,7 +51,8 @@ These personas are internal engineering roles who consume agentic-SDLC measureme
 
 ## Dependencies
 
-- **Org Pulse dashboard (OSAC-2004):** Provides the dashboard surface this framework's trend data extends; must not duplicate EP Review Bot score visibility already dashboarded there (OSAC-2007). [Clarify: R1.Q4]
+- **Org Pulse dashboard (OSAC-2004):** Provides the dashboard surface this framework's eval-trend data extends; must not duplicate EP Review Bot score visibility already dashboarded there (OSAC-2007). [Clarify: R1.Q4]
+- **UOI / Konflux DevLake dashboard:** Provides the Issue Cycle Time and PR Cycle Time tabs this framework's MTTR/velocity formulas extend with an agent-attribution dimension, rather than a new fetcher or feed — added 2026-07-28 per Eran Cohen's direction on [OSAC-2261](https://redhat.atlassian.net/browse/OSAC-2261); pipeline ownership and segmentation feasibility are coordinated via OSAC-2518.
 - **Bug-fix evaluation harness (OSAC-516 / `eranco74/osac-bugfix-eval`):** Supplies the RCA-accuracy and bug-fix-outcome data this framework ingests rather than re-implementing; currently lives on a personal fork with no organizational backup. [Jira: OSAC-959]
 - **Alignment sign-off (Eran Cohen):** Two program-level questions — comfortable with phased E2E validation and indirect RCA accuracy for this milestone, and whether Epic 3–4 priorities should shift — remain unanswered as of this PRD. [Clarify: R1.Q6]
 
