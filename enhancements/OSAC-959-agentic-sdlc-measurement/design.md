@@ -31,7 +31,7 @@ Build a phased measurement framework that scores the quality of AI-agent-driven 
 
 ## Motivation
 
-The team has no dedicated way to tell whether AI-agent-driven bug-fix and feature-development work is actually working. The only existing signal — the FTPR (first-time-pass-rate) dashboard in UOI (Konflux DevLake) — predates the agentic effort and measures CI pass rate on first commit across all merged PRs; it does not isolate agent-driven work, and it says nothing about whether an agent's *reasoning* (a PRD, a design, a root-cause diagnosis) was sound before code was ever written.
+The team has no dedicated way to tell whether AI-agent-driven bug-fix and feature-development work is actually working. The only existing signal — the FTPR (first-time-pass-rate) dashboard in **leading forward metrics** (UOI, Konflux DevLake) — predates the agentic effort and measures CI pass rate on first commit across all merged PRs; it does not isolate agent-driven work, and it says nothing about whether an agent's *reasoning* (a PRD, a design, a root-cause diagnosis) was sound before code was ever written.
 
 **This asymmetry is worth stating plainly, since it recurs in review: every metric visible today — FTPR in UOI, and the EP Review Bot scores OSAC-2007 already dashboards in Org Pulse — is an all-work aggregate, not agent-isolated.** The Phase 3 metrics this design adds (MTTR, PR velocity — Proposal, Operations metrics) are explicitly agent-attributed from the start: MTTR is scoped to agent-labeled bugs only, and velocity is split agent-vs-human per PR by attribution priority (PR label → `Assisted-by:` commit trailer → bot/service account). Per Eran Cohen's direction on [OSAC-2261](https://redhat.atlassian.net/browse/OSAC-2261) (2026-07-16), both land as an agent-attribution extension to UOI's own **Issue Cycle Time** and **PR Cycle Time** tabs (Konflux DevLake) rather than a new `org-pulse-data` fetcher or a new Org Pulse tab — UOI already ingests the underlying Jira/GitHub data these formulas need (see Implementation Details: **Operational metrics platform**). FTPR itself is not part of that extension and does not become one: this design segments Issue Cycle Time/PR Cycle Time by AI authorship, it does not retrofit FTPR's own CI-pass-rate computation the same way (see Non-Goals).
 
@@ -64,15 +64,15 @@ Four industry-standard components make up a production LLM/agent eval harness: a
 The framework has four pieces, three workspace-native and one an extension of external systems: (1) `evals/review/` — harness judges (`score.py`, reused from `agent-eval-harness` as a dependency) scoring the EP Review Bot's real, already-posted PR comments against a human-curated golden dataset, not a locally re-executed copy of the skill; (2) an ingestion adapter that folds OSAC-516's bug-fix eval output into a common report schema; (3) MTTR/velocity formulas and agent-attribution rules (documented in `measurement-taxonomy.md`) coordinated into an extension of UOI's (Konflux DevLake) existing Issue Cycle Time and PR Cycle Time tabs — not a new workspace-native fetcher or feed; (4) an extension to the existing Org Pulse dashboard for harness eval trends (the `eval_run` feed from 1–2), and a new weekly reporting pipeline that reads Org Pulse's eval trends and links UOI's (extended) tabs for MTTR/velocity. Phasing detail is in Implementation Details/Notes/Constraints.
 
 ```mermaid
-flowchart LR
-    subgraph "Quality gate (Phase 1-2)"
+flowchart TD
+    subgraph QG["Quality gate (Phase 1-2)"]
         A[Contributor opens EP PR] --> B[EP Review Bot: prd-review / design-review skill]
         B -->|already-posted PR comment| C[Harness: evals/review/ fetches comment via GitHub API]
         C -->|score.py judges vs. golden human reference| D[eval_run feed]
         E[osac-bugfix-eval: OSAC-516] -->|fix_correctness, RCA proxy| D
     end
-    subgraph "Delivery outcomes (Phase 3-4)"
-        F[UOI / Konflux DevLake: existing Jira+GitHub ingestion] -->|agent-attribution dimension added| G[Issue Cycle Time / PR Cycle Time tabs: MTTR + velocity]
+    subgraph DO["Delivery outcomes (Phase 3-4)"]
+        F[Leading forward metrics: existing Jira+GitHub ingestion] -->|agent-attribution dimension added| G[Issue Cycle Time / PR Cycle Time tabs: MTTR + velocity]
     end
     D --> H[Org Pulse dashboard: new eval trend tabs]
     H --> I[Weekly automated report]
