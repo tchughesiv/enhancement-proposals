@@ -44,6 +44,13 @@ A live `jira` CLI query run during this design (2026-07-30) also found zero Jira
 - Populating the golden-set eval cases (10 PRD / 6 design) or configuring harness judges/thresholds — that is OSAC-2264/OSAC-2267 scope. This design specifies the data contract those efforts must emit into so Planning-review's Key Metrics have somewhere to land once they exist.
 - Real-time or webhook-driven updates — inherits the existing ~30-minute fetch cadence and ~5-minute sidecar-poll cadence as-is. `[Locked: D5]`
 - A new database or persistent store beyond `org-pulse-data`'s existing JSON-committed-to-git pattern.
+- Inventory, Provisioning, Networking, and Storage backend changes — not applicable; this Feature has no infrastructure-provisioning surface. Tenant Onboarding is likewise not applicable (see RBAC / Tenancy).
+
+## Terminology
+
+- **Bot role** — one of the four groups this design tracks separately: `bug_fix_flow` (`jira-ai-issue-solver`), `planning_generation` (`prd-creator`/`design-creator`), `planning_review` (EP Review Bot via `agent-eval-harness`), and `implementation` (code-stage bot; currently unattributed — see Motivation).
+- **Bot Metric Record** — the canonical per-record shape every extended fetcher emits (see Implementation Details), grouping fields by concern: `botIdentity`, `cost`, `reliability`, `ci`, `judgeAgreement`, `continuousImprovement`.
+- **`state`** — a per-field-group status flag that is never absent, always one of: `reported` (real data present), `not_yet_reported` (upstream hasn't started emitting this yet), `unattributed` (identity-specific — the record exists but which bot/model produced it is unknown), or `building_baseline` (data exists but sample size is below the minimum for a reliable trend).
 
 ## Proposal
 
@@ -302,6 +309,16 @@ Each page includes a link out to the existing UOI (Konflux DevLake) view for MTT
 
 The rolling 8-week trend chart on both pages is a client-side display window over the same unbounded, overwrite-pattern JSON history `org-pulse-data` already retains for its other trend charts (e.g., Autofix) — no new retention or purge infrastructure is introduced to support it. `[Locked: D7]`
 
+### Dashboard User Documentation
+
+The PRD identifies a documentation need it explicitly defers to this design to plan (though not fully deliver): a short guide explaining the five evaluation dimensions and the three missing-data states (`not_yet_reported`, `building_baseline`, `unattributed`) so a first-time dashboard viewer doesn't misread them as zero, broken, or a bot with no cost. This design specifies where that guide lives and who owns it:
+
+- **Content owner:** whoever implements the two dashboard pages — the same owner Dashboard pages above already assigns exact tile layout and component decisions to. The guide is a short companion to that implementation, not a separate research effort.
+- **Delivery point:** shipped alongside the Dev Preview graduation milestone (see Graduation Criteria), as an in-module reference (e.g., a linked page or tooltip) within Org Pulse's AI Impact space — consistent with the Org Pulse platform's own existing convention of documenting data shapes in-repo (e.g., `rhai-org-pulse`'s `docs/DATA-FORMATS.md`) rather than in a separate docs site.
+- **Content scope:** the four bot roles and three `state` values defined in Terminology above, plus a one-line description of each of the five evaluation dimensions from the PRD — this design's own Terminology and Bot Metric Record sections are the source material, so no new content research is required to write it.
+
+This introduces no new documentation infrastructure — it reuses the Org Pulse platform's existing in-repo documentation convention as the delivery mechanism.
+
 ## Security Considerations
 
 No new authentication or authorization surface. The extended fetchers use the same Jira service-account credentials and the same GitHub API access (`gh` CLI, already authenticated in `org-pulse-data`'s CI) that `fetch-ep-review.py` already uses today — the only change is which repos/paths are read (`fetch-autofix.py` gains read-only PR-comment access to whatever repos `jira-ai-issue-solver` opens PRs against; `fetch-eval-summary.py` gains read-only contents access to `osac-project/osac-workspace`). No new write scope is introduced anywhere in this design — every fetcher remains read-only against Jira/GitHub, consistent with `org-pulse-data`'s existing model. Org Pulse's own platform-level authentication for the AI Impact space is unchanged; this Feature adds pages within that existing boundary.
@@ -401,6 +418,7 @@ Does `traces.metrics: true` (already set in both `eval-prd-review.yaml` and `eva
 
 ### Integration Tests
 
+- Run `fetch-autofix.py` end-to-end against a scripted fixture combining a mocked Jira `remotelink` response and a mocked GitHub PR-comments response (both `AI-BOT-COST` and `[AI-BOT-STATUS]` present), and verify the resulting record matches the Bot Metric Record shape with `cost.state=reported` and `reliability.state=reported` — exercising the discovery-then-parse pipeline together, not just each half in isolation.
 - Run `evals/review/run-eval.sh --type prd --case _harness-smoke --skip-execute --skip-score` followed by the new adapter, and verify it produces a schema-valid `summary.json` against `evals/lib/unified-report.schema.yaml` — using the existing smoke fixture for wiring validation only, consistent with its documented "not a quality baseline" caveat.
 - New adapter tests follow `evals/review/`'s existing `pytest` conventions (`lib/test_judges.py`-style structure) rather than introducing a new test framework.
 
@@ -446,6 +464,7 @@ None. Every component runs on existing GitLab CI runners (`org-pulse-data`), the
 
 ## Provenance
 
-Authored: draft @ design 0.5.0 - 68284c8, workspace main @ 07cf78f3
+Authored: revise @ design 0.5.0 - 68284c8, workspace main @ 07cf78f3
+Phases: draft, revise
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"design","workflow_version":"0.5.0","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"design","workflow_version":"0.5.0","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft","revise"],"authoring_modes":["skill"],"context_changed":false} -->
