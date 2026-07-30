@@ -1,338 +1,451 @@
 ---
-title: agentic-sdlc-measurement
+title: agentic-sdlc-evaluation-framework
 authors:
   - tohughes@redhat.com
-creation-date: 2026-07-23
-last-updated: 2026-07-28
+creation-date: 2026-07-30
+last-updated: 2026-07-30
 tracking-link:
   - https://redhat.atlassian.net/browse/OSAC-959
 prd:
   - "prd.md"
 see-also:
-  - "N/A — no other merged enhancement in this repo overlaps. Related Jira-tracked work (Org Pulse/OSAC-2004, bugfix eval/OSAC-516, EP Review Bot/OSAC-1773) is not itself a formal EP; see the PRD's Dependencies section."
+  - N/A
 replaces:
-  - "N/A"
+  - N/A
 superseded-by:
-  - "N/A"
+  - N/A
 ---
 
-# Agentic SDLC Measurement
+# Agentic SDLC Evaluation Framework
 
 ## Summary
 
-Build a phased measurement framework that scores the quality of AI-agent-driven planning and bug-fix work against human-validated reference cases, then surfaces operational trends (MTTR, velocity) through the team's existing Org Pulse dashboard rather than a new one. This gives engineering leadership a trustworthy, independently-calibrated signal for whether the agentic SDLC transition is actually working, instead of an unvalidated LLM-as-judge score taken at face value. See [PRD](prd.md) for detailed requirements.
-
-## Terminology
-
-- **Golden case / golden dataset:** a curated set of real, already-merged `enhancement-proposals` PRs (`evals/review/cases/`) with a human-authored `reference-review.md` and `annotations.yaml` — the fixed reference this design's judges score against. Each `reference-review.md` represents **one documented human consensus judgment**, not an objective ground truth — two qualified reviewers can reasonably disagree on a subset of findings (see Risks and Mitigations).
-- **Judges:** the three scoring checks this design runs — `rubric_scoring` (deterministic, regex-parses the skill's own rubric table), `critical_findings_recall` (deterministic, fuzzy-matches annotated critical findings), and `qualitative_finding_quality` (LLM-as-judge, the only one affected by model choice).
-- **Calibration:** the process of checking that a judge's verdict agrees with a human reviewer's verdict on golden cases — the trust mechanism this design relies on instead of (or ahead of) model-family separation.
-- **`eval_run`:** the feed type in `evals/lib/unified-report.schema.yaml` that Org Pulse's eval trend tabs and the weekly report read from — judge/skill scoring results (Phase 1–2). MTTR/velocity (Phase 3) have no workspace-native feed of their own — see **Operational metrics platform** (Implementation Details): they're delivered as an agent-attribution extension to UOI's own Issue Cycle Time/PR Cycle Time tabs instead.
+This design extends OSAC's existing Org Pulse data pipeline (`edge-infrastructure/org-pulse-data`) and its two production fetchers, plus the workspace's shared provenance-marker library and the `evals/` eval-harness scaffolding, so that four bot roles — Bug Fix Flow, Planning-generation, Planning-review, and Implementation — each emit cost, identity, reliability, and (for the review role) judge-agreement data through mechanisms those systems already use today. A new declarative role-scope config and two Org Pulse dashboard pages consume that data. No new service, database, or push endpoint is introduced. See [PRD](prd.md) for detailed requirements.
 
 ## Motivation
 
-The team has no dedicated way to tell whether AI-agent-driven bug-fix and feature-development work is actually working. The only existing signal — the FTPR (first-time-pass-rate) dashboard in **leading forward metrics** (UOI, Konflux DevLake) — predates the agentic effort and measures CI pass rate on first commit across all merged PRs; it does not isolate agent-driven work, and it says nothing about whether an agent's *reasoning* (a PRD, a design, a root-cause diagnosis) was sound before code was ever written.
+OSAC already runs three architecturally unrelated bot systems in production: `jira-ai-issue-solver` (a Go binary running in Kubernetes Jobs, state held in Jira/GitHub, no database), `eranco74/ai-skills` (a Claude-Code-skill pipeline that self-publishes via git), and `agent-eval-harness` (a Python scoring harness invoked via a script chain). Each already externalizes some of what this Feature needs — `jira-ai-issue-solver` posts structured `<!-- AI-BOT-COST -->` and `[AI-BOT-STATUS]` PR comments today; the workspace's own `ai-workflows` `provenance.py` library, which `ai-skills` also calls, already embeds a machine-readable marker in every PRD/design doc it publishes; `evals/lib/unified-report.schema.yaml` already reserves a `feed_type: eval_run` discriminator explicitly for Org Pulse ingestion. None of the three emits everything this Feature needs, and no existing system aggregates the three into role-comparable metrics.
 
-**This asymmetry is worth stating plainly, since it recurs in review: every metric visible today — FTPR in UOI, and the EP Review Bot scores OSAC-2007 already dashboards in Org Pulse — is an all-work aggregate, not agent-isolated.** The Phase 3 metrics this design adds (MTTR, PR velocity — Proposal, Operations metrics) are explicitly agent-attributed from the start: MTTR is scoped to agent-labeled bugs only, and velocity is split agent-vs-human per PR by attribution priority (PR label → `Assisted-by:` commit trailer → bot/service account). Per Eran Cohen's direction on [OSAC-2261](https://redhat.atlassian.net/browse/OSAC-2261) (2026-07-16), both land as an agent-attribution extension to UOI's own **Issue Cycle Time** and **PR Cycle Time** tabs (Konflux DevLake) rather than a new `org-pulse-data` fetcher or a new Org Pulse tab — UOI already ingests the underlying Jira/GitHub data these formulas need (see Implementation Details: **Operational metrics platform**). FTPR itself is not part of that extension and does not become one: this design segments Issue Cycle Time/PR Cycle Time by AI authorship, it does not retrofit FTPR's own CI-pass-rate computation the same way (see Non-Goals).
+The implementation challenge is therefore not building new instrumentation infrastructure — `org-pulse-data`'s existing scheduled-fetch/sidecar-poll pipeline already does that job for two other OSAC dashboards — but bridging three heterogeneous, already-live emission mechanisms into one comparable data model without introducing a fourth. Direct inspection of the live pipeline during design research confirmed the per-role starting points are asymmetric: Bug Fix Flow already emits cost and retry data externally (only bot identity is missing); Planning-generation emits neither cost nor duration anywhere yet; Planning-review's calibration mechanics (harness judges, golden-set cases) are themselves still unconfigured (`judges: TBD` in both eval YAMLs; `cases/{prd,design}/` are empty placeholders). This design treats that asymmetry explicitly rather than proposing one uniform "add a field" plan across all three.
 
-**This framework evaluates the production review system's behavior, not the `prd-review`/`design-review` skill in isolation.** The pipeline this design scores is `skill → EP Review Bot → bot output → evaluation` — if the bot's prompt, retrieval, context assembly, model, or output formatting changes independently of the skill file itself, a calibration score can move even though the skill's own logic didn't change. That coupling is a deliberate, accepted consequence of scoring real production output instead of a second execution pipeline (see Alternatives), not a design flaw discovered after the fact — stated here explicitly so a reader doesn't have to infer it from Motivation's later architecture discussion.
-
-Industry treats this as two distinct measurement layers: **quality gates** (does agent/skill output pass a rubric before merge — a regression suite against a golden dataset) and **delivery outcomes** (lead time, MTTR, velocity — DORA-style telemetry, optionally segmented by AI vs. human authorship). This design addresses the quality-gate layer first, then extends into delivery outcomes once the gate is proven — the same sequencing DORA's 2025–2026 generative-AI research recommends (baseline before claiming ROI) and the same order Eran Cohen specified for this Feature.
-
-A production consumer of this same quality-gate layer already exists: the EP Review Bot ([OSAC-1773](https://redhat.atlassian.net/browse/OSAC-1773)) runs on every `enhancement-proposals` pull request and posts `prd-review`/`design-review` scores live. As of `enhancement-proposals` commit `c6df563` (OSAC-2815, merged 2026-07-16), the bot clones this workspace and runs the *same* `skills/prd-review/SKILL.md` / `skills/design-review/SKILL.md` files this harness grades — they are not independently-maintained prompts. That convergence changes what this design needs to justify: the harness is not a second implementation of the bot's logic, it is the accuracy backstop the bot itself lacks. The bot only performs inference — it runs the skill and posts whatever it outputs, with no check against a human-validated baseline. Nothing about the bot's own pipeline calibrates its verdicts against what a human reviewer would have said; that calibration is this harness's entire purpose.
-
-Four industry-standard components make up a production LLM/agent eval harness: a golden dataset, multi-layer scorers (deterministic + LLM-as-judge), a runner, and a required CI gate. This design delivers a variant of the first two directly, and deliberately does not build the third or fourth as originally conceived. Scoring the EP Review Bot's already-posted PR comment — rather than locally re-executing the skill — means there is no separate "runner" component to build: the harness's own scoring engine (`score.py`) is reused as a dependency, but nothing under this design's control ever invokes the skill under test. That, in turn, makes a blocking pre-merge CI gate structurally inapplicable, not just deferred: there is no local re-execution step to gate a not-yet-merged skill/rubric change against — the earliest this design can score a change is after it ships and the bot reviews the next real PR. [OSAC-3010](https://redhat.atlassian.net/browse/OSAC-3010)'s local-vs-remote (Harbor/EvalHub) execution-mode question, which previously motivated deferring the gate, is therefore moot for this design: there is no execution mode to choose between, local or remote, because there is no execution. Pre-merge regression testing for skill authors is a real, legitimate capability this design does not deliver — see Non-Goals and Alternatives for why, and where that capability could live instead ([OSAC-2019](https://redhat.atlassian.net/browse/OSAC-2019)) if ever requested.
+A live `jira` CLI query run during this design (2026-07-30) also found zero Jira Task-type issues carrying a bot-processing label or bot assignee — the PRD's fourth role group, Implementation-stage, has no confirmed bot in production today. This design still builds that role group's plumbing (Non-Goals does not exclude it), so it is ready the moment a bot starts processing Tasks, but its dashboard section starts in the "building baseline" state with zero attributed bots, which is a correct outcome under `[Locked: D3]`, not a gap in this design.
 
 ### Goals
 
-- **The bot's already-posted review score is independently checked against human judgment, not trusted at face value.** The harness's own judges (`rubric_scoring`, `critical_findings_recall`, `qualitative_finding_quality`) score the EP Review Bot's real PR comment on curated golden-case PRs against a human-validated reference — not a locally re-executed copy of the skill. (See Alternatives for why a custom scorer, and why local re-execution, were both rejected.)
-- **Engineers can trust that a reported score reflects human judgment, not just model self-consistency.** LLM-as-judge scoring is validated against human-authored reference cases (quantified via Cohen's κ) before being treated as reliable — the mechanism that establishes trust, not the choice of judge model. [PRD: In Scope — judge-model policy] [Locked: D7]
-- **Lead Engineer, Product Owner, and DevOps Engineer personas see agent performance trends without a new tool to learn.** Eval-quality trends (Phases 1–2, 4) extend the Org Pulse dashboard they already use daily; MTTR/velocity trends (Phase 3) extend UOI's existing Issue Cycle Time/PR Cycle Time tabs instead (per Eran Cohen's direction on [OSAC-2261](https://redhat.atlassian.net/browse/OSAC-2261) — see Operational metrics platform), and the weekly report (Story 4.02) links both from one place rather than requiring either audience to check two dashboards separately. [PRD: Dependencies — Org Pulse, UOI] [Locked: D4] (See Alternatives for why a standalone dashboard was rejected — both surfaces extended here are pre-existing, daily-use dashboards, not new ones.)
-- **RCA-accuracy and bug-fix-outcome trends are visible without this workspace re-implementing bug-fix evaluation** — the external `osac-bugfix-eval` (OSAC-516) harness's output is ingested, not duplicated. [PRD: Dependencies — bugfix harness]
-- **A recurring calibration signal shows whether the bot's self-reported scores can be trusted, without a second execution pipeline to produce it.** This runs periodically against a sample of real, already-reviewed PRs — not as a merge gate, since there is no pre-merge artifact to gate against under this architecture (see Motivation, Non-Goals).
+1. Extend, never replace, `org-pulse-data`'s two production fetchers (`fetch-ep-review.py`, `fetch-autofix.py`) and the shared `ai-workflows` `provenance.py` marker schema — no new ingestion service, push endpoint, or database. `[Locked: D1]`
+2. Reuse the GitHub PR-comment-scraping pattern already proven in `fetch-ep-review.py` (`fetch_remote_links` → `filter_ep_prs` → `gh api` comment fetch) for `fetch-autofix.py`, rather than inventing a second Jira-to-GitHub correlation mechanism. `[Codebase: edge-infrastructure/org-pulse-data/fetch-ep-review.py]`
+3. Treat `evals/lib/unified-report.schema.yaml` — already tagged `feed_type: eval_run` for Org Pulse ingestion — as the canonical Planning-review data contract, extending it additively rather than inventing a parallel schema. `[Codebase: evals/lib/unified-report.schema.yaml]`
+4. Represent every missing-data case as an explicit state value at the fetcher-output layer, not as null or zero, so the frontend renders `[Locked: D3]`/`[Locked: D8]` without per-page special-casing.
+5. Make bot-role-scope membership (which bot feeds which of the four selector groups) data, not code, so adding a fifth bot to an existing role — or a bot that starts filling the empty Implementation-stage role — requires a config change, not a dashboard-page code change.
 
 ### Non-Goals
 
-- **Pre-merge regression testing for a not-yet-merged skill/rubric change.** This design deliberately does not re-execute `prd-review`/`design-review` locally; it only scores the bot's already-posted, real PR output. A skill author wanting to test a draft change before opening a PR has no automated check from this design — see Alternatives. This capability, if ever prioritized, belongs under [OSAC-2019](https://redhat.atlassian.net/browse/OSAC-2019) (Agentic SDLC Quality), which already runs an equivalent pre-merge loop for the bugfix skill (OSAC-516); it is not built here because it serves the harness-maintainer/skill-author persona explicitly excluded from this PRD. [Locked: D2]
-- Replacing FTPR or the UOI dashboard itself — FTPR remains the CI-pass-rate baseline it already is; this design extends two of UOI's *other* tabs (Issue Cycle Time, PR Cycle Time) with an agent-attribution dimension (see Implementation Details: **Operational metrics platform**), it does not retrofit FTPR's own computation or replace UOI with a new surface. [PRD: Assumptions]
-- Building a standalone bug-fix evaluation harness — OSAC-516/`osac-bugfix-eval` already does this; this design only ingests its output. [Codebase: `AUDIT.md` §2]
-- Custom fine-tuning of the skill or judge LLMs.
-- Code quality metrics (test coverage, cyclomatic complexity), OSAC Tenant User productivity tracking, and tenant/production AI-usage cost analysis — all explicitly out of scope per the PRD. [PRD: Out of Scope]
+- Rebuilding, forking, or modifying the internal logic of `jira-ai-issue-solver`, `eranco74/ai-skills`, or `agent-eval-harness` — this design specifies what each must additionally emit and where `org-pulse-data` reads it, not how those systems otherwise work.
+- Populating the golden-set eval cases (10 PRD / 6 design) or configuring harness judges/thresholds — that is OSAC-2264/OSAC-2267 scope. This design specifies the data contract those efforts must emit into so Planning-review's Key Metrics have somewhere to land once they exist.
+- Real-time or webhook-driven updates — inherits the existing ~30-minute fetch cadence and ~5-minute sidecar-poll cadence as-is. `[Locked: D5]`
+- A new database or persistent store beyond `org-pulse-data`'s existing JSON-committed-to-git pattern.
 
 ## Proposal
 
-The framework has four pieces, three workspace-native and one an extension of external systems: (1) `evals/review/` — harness judges (`score.py`, reused from `agent-eval-harness` as a dependency) scoring the EP Review Bot's real, already-posted PR comments against a human-curated golden dataset, not a locally re-executed copy of the skill; (2) an ingestion adapter that folds OSAC-516's bug-fix eval output into a common report schema; (3) MTTR/velocity formulas and agent-attribution rules (documented in `measurement-taxonomy.md`) coordinated into an extension of UOI's (Konflux DevLake) existing Issue Cycle Time and PR Cycle Time tabs — not a new workspace-native fetcher or feed; (4) an extension to the existing Org Pulse dashboard for harness eval trends (the `eval_run` feed from 1–2), and a new weekly reporting pipeline that reads Org Pulse's eval trends and links UOI's (extended) tabs for MTTR/velocity. Phasing detail is in Implementation Details/Notes/Constraints.
+This design adds three fetcher-side extensions, one new shared config file, and two dashboard pages, all inside systems OSAC already operates:
+
+1. **Bug Fix Flow extension** — `fetch-autofix.py` gains PR-comment reading (a capability it does not have today) to parse the cost/status comments `jira-ai-issue-solver` already posts.
+2. **Planning-generation extension** — the shared `provenance.py` marker schema gains optional cost/duration/model fields; `fetch-ep-review.py`'s existing generic JSON parse of that marker picks them up with zero fetcher-code changes once `ai-skills` starts emitting them.
+3. **Planning-review extension** — a new adapter script fills the currently-empty gap between `evals/review/`'s harness output and `evals/lib/unified-report.schema.yaml`'s already-reserved Org Pulse feed, computing judge/human agreement (Cohen's κ), false-pass/false-fail rate, and surfacing human-override rate (derivable today with zero new upstream emission).
+4. **`bot-roles.yaml`** — a new declarative config in `org-pulse-data` mapping known bot identities to one of the four role-scope groups, read by all fetchers and re-exported as its own small JSON for the frontend selector.
+5. **Two Org Pulse dashboard pages** — added as new tabs within the existing "AI Impact" module, not new platform modules, per `docs/MODULES.md`'s existing per-module data-route pattern.
 
 ```mermaid
-flowchart TD
-    subgraph QG["Quality gate (Phase 1-2)"]
-        A[Contributor opens EP PR] --> B[EP Review Bot: prd-review / design-review skill]
-        B -->|already-posted PR comment| C[Harness: evals/review/ fetches comment via GitHub API]
-        C -->|score.py judges vs. golden human reference| D[eval_run feed]
-        E[osac-bugfix-eval: OSAC-516] -->|fix_correctness, RCA proxy| D
+flowchart TB
+    subgraph Bots["Three production bot systems (unchanged internally)"]
+        BF["jira-ai-issue-solver<br/>(Bug Fix Flow)"]
+        PG["ai-skills prd-creator/design-creator<br/>(Planning: generation)"]
+        RV["agent-eval-harness via evals/review/<br/>(Planning: review calibration)"]
     end
-    subgraph DO["Delivery outcomes (Phase 3-4)"]
-        F[Leading forward metrics: existing Jira+GitHub ingestion] -->|agent-attribution dimension added| G[Issue Cycle Time / PR Cycle Time tabs: MTTR + velocity]
+
+    subgraph OPD["edge-infrastructure/org-pulse-data (extended)"]
+        FA["fetch-autofix.py<br/>+ PR-comment parsing"]
+        FE["fetch-ep-review.py<br/>+ generic marker fields (no code change)"]
+        FS["fetch-eval-summary.py (new)"]
+        BR["bot-roles.yaml (new)"]
     end
-    D --> H[Org Pulse dashboard: new eval trend tabs]
-    H --> I[Weekly automated report]
-    G --> I
-    I --> J[Lead Engineer / Product Owner / DevOps Engineer]
+
+    subgraph WS["osac-workspace (extended)"]
+        PV["provenance.py<br/>+ optional cost/duration/model"]
+        AD["evals/lib adapter (new)<br/>writes evals/results/latest/summary.json"]
+    end
+
+    BF -->|"PR comments:<br/>AI-BOT-COST, AI-BOT-STATUS"| FA
+    PG -->|"provenance.py capture<br/>--cost-usd --duration-seconds --model"| PV
+    PV -->|"marker embedded in<br/>committed prd.md/design.md"| FE
+    RV --> AD
+    AD --> FS
+    BR --> FA
+    BR --> FE
+    BR --> FS
+
+    FA --> JSON[("Committed JSON<br/>(GitLab CI, diff-gated)")]
+    FE --> JSON
+    FS --> JSON
+
+    JSON -->|"sidecar poll, ~5 min"| ORG["Org Pulse backend"]
+    ORG --> P1["Bug Fix Flow Evaluation page"]
+    ORG --> P2["Feature Development Flow Evaluation page"]
 ```
 
-The diagram separates the two measurement layers from Motivation and shows where they merge: the harness and the external bugfix-eval both write into a single `eval_run`-shaped feed that Org Pulse's new eval-trend tabs consume; MTTR/velocity (Phase 3) instead land directly on UOI's own (extended) Issue Cycle Time/PR Cycle Time tabs, since UOI already ingests the underlying Jira/GitHub data — no new workspace-native fetcher or feed. The weekly report is the one place both layers converge for the PRD's personas; Org Pulse itself only ever gains new tabs for the eval-trend layer, not a duplicate of UOI's delivery-outcome tabs. Unlike an earlier iteration of this design, the harness does not run an independent execution stack alongside the bot — it consumes the bot's own already-posted output directly, so there is no separate "runner" relationship to reconcile via a future CI gate; the harness and the bot are two stages of one pipeline, not two parallel ones.
+The diagram shows the full path from each bot system to the two dashboard pages. Nothing left of `org-pulse-data` changes its own architecture — `jira-ai-issue-solver` keeps posting the same comments, `ai-skills` keeps calling the same shared script, `agent-eval-harness` keeps running the same script chain. Everything this design adds sits in the three repos OSAC already owns and already schedules: `org-pulse-data`'s fetchers, this workspace's `provenance.py`/`evals/lib`, and Org Pulse's existing AI Impact module.
 
 ### Workflow Description
 
-Actors: **Contributor** (opens a PRD/EP pull request), **EP Review Bot** (automated, runs in `enhancement-proposals` CI), **Harness** (automated, runs locally or in CI on `osac-workspace`), **Lead Engineer / Product Owner / DevOps Engineer** (consume aggregated trend output — the PRD's personas). [PRD: User Stories]
+Actors: **Lead Engineer**, **Product Owner**, and **DevOps Engineer** (this Feature's personas per PRD Assumptions — none of OSAC's four tenant/provider personas apply, since nothing here is tenant-facing). The primary end-user workflow is viewing a dashboard; the more consequential workflows are the four scheduled data-ingestion paths that populate it.
 
-1. A contributor opens a pull request against `enhancement-proposals` containing `prd.md` and/or `design.md`.
-2. The EP Review Bot clones `osac-workspace`, runs `skills/prd-review` and/or `skills/design-review` against the changed file(s), and posts a scored comment on the PR. This happens today, independent of this design.
-3. For curated golden-case PRs (`evals/review/cases/`), the harness fetches the bot's already-posted comment via the GitHub API and writes it to the path `score.py` expects (`{run_dir}/{case_id}/artifacts/review-output.md`) — no local skill invocation occurs.
-4. The harness's judges (`rubric_scoring`, `critical_findings_recall`, `qualitative_finding_quality`) score that fetched comment against the case's `reference-review.md` + `annotations.yaml`, and write a report. `rubric_scoring` is skipped for bot-sourced `prd-review` cases until [OSAC-3123](https://redhat.atlassian.net/browse/OSAC-3123) (the bot's PRD score table doesn't match the skill's own rubric) is resolved; it already works for `design-review` cases.
-5. If a judge fails, the engineer inspects `evals/review/results/` to determine whether the bot's real output has actually regressed, or whether the case/rubric needs updating.
-6. This runs on one of four decided triggers — change-driven, weekly-scheduled, rolling-sample, or manual/diagnostic (see Implementation Details: Evaluation cadence) — never as a pre-merge gate, since there is no pre-merge artifact to gate under this architecture. A not-yet-merged skill/rubric change can only be observed once it ships and the bot reviews the next real PR (see Motivation, Non-Goals).
-7. In parallel, UOI's Konflux DevLake pipeline (Phase 3) computes MTTR/velocity directly from its own existing Jira/GitHub ingestion, extended with an agent-attribution dimension (see Operational metrics platform); the bugfix-eval adapter (Phase 2) populates `eval_run` from OSAC-516's output.
-8. Org Pulse ingests the `eval_run` feed and renders new eval trend tabs; the weekly reporting pipeline (Phase 4) reads Org Pulse's eval trends, links UOI's (extended) tabs for MTTR/velocity, and produces the automated report the PRD's DevOps Engineer and Lead Engineer personas consume.
+#### Scheduled ingestion (unchanged cadence, extended content)
 
-**Error handling variant — a judge call fails mid-run (e.g., LLM API timeout):** the run exits non-zero for that case, no report is written, and the previous baseline in `evals/review/results/baseline/` remains the last-known-good comparison point; nothing overwrites it. See Failure Handling and Recovery.
+```mermaid
+sequenceDiagram
+    participant CI as org-pulse-data GitLab CI (~30 min)
+    participant FA as fetch-autofix.py
+    participant FE as fetch-ep-review.py
+    participant FS as fetch-eval-summary.py
+    participant GIT as org-pulse-data git repo
+    participant SC as Org Pulse sidecar (~5 min poll)
+    participant OP as Org Pulse backend
 
-**Error handling variant — a golden-case PR has no bot comment yet (outage, rate limit, or the PR predates the bot going live):** that case can't be scored this run. Trigger the bot manually via the `/review-ep` slash command `ep-review.yml` already supports, then re-run. See Failure Handling and Recovery.
+    CI->>FA: run
+    CI->>FE: run
+    CI->>FS: run
+    FA->>GIT: commit autofix-data.json (only if changed)
+    FE->>GIT: commit features.json / assessments.json (only if changed)
+    FS->>GIT: commit eval-summary.json (only if changed)
+    SC->>GIT: poll for new commits
+    GIT-->>SC: updated JSON
+    SC->>OP: sync into shared volume
+    OP-->>OP: serve on next dashboard request
+```
+
+This is `org-pulse-data`'s existing scheduled-fetch + diff-gated-commit + sidecar-poll chain, unchanged in cadence or mechanism `[Locked: D5]`. `fetch-eval-summary.py` is the one net-new fetcher process; it runs alongside the two extended ones on the same schedule.
+
+#### Bug Fix Flow: cost/retry/identity extraction
+
+```mermaid
+sequenceDiagram
+    participant Bot as jira-ai-issue-solver
+    participant PR as GitHub PR
+    participant FA as fetch-autofix.py
+    participant Jira as Jira REST API
+
+    Bot->>PR: post/update comment <!-- AI-BOT-COST -->
+    Bot->>PR: post [AI-BOT-STATUS] on retry/failure
+    FA->>Jira: search Bug + Task issues (JQL)
+    FA->>Jira: GET /rest/api/3/issue/{key}/remotelink
+    Jira-->>FA: linked PR URL (if any)
+    alt PR URL found
+        FA->>PR: gh api issues/{pr}/comments
+        PR-->>FA: comment bodies
+        FA->>FA: parse AI-BOT-COST table, AI-BOT-STATUS count
+        FA->>FA: set cost.state=reported, retries.state=reported
+    else no PR yet or comment absent
+        FA->>FA: set cost.state=not_yet_reported
+    end
+    FA->>FA: botIdentity.state=unattributed (no per-run model field exists)
+```
+
+`fetch-autofix.py` has no PR-awareness today — it only calls Jira's issue-search API. The extension adds the same `remotelink`-lookup pattern `fetch-ep-review.py` already uses (generalized to accept any repo, not just `enhancement-proposals`), then parses the same two comment markers `jira-ai-issue-solver` already posts. Bot identity stays `unattributed` until the upstream repo starts emitting it (see Implementation Details).
+
+#### Planning-generation: provenance-marker extension
+
+```mermaid
+sequenceDiagram
+    participant Skill as ai-skills prd-creator/design-creator
+    participant PV as provenance.py capture
+    participant Doc as committed prd.md/design.md
+    participant FE as fetch-ep-review.py
+
+    Skill->>PV: capture --workflow prd --phase draft --cost-usd 2.14 --duration-seconds 480 --model claude-sonnet-4-6
+    PV->>Doc: render
+    FE->>Doc: fetch_file_content(prd.md, ref)
+    FE->>FE: detect_provenance(content) - generic json.loads, unchanged code
+    FE-->>FE: new fields already present in parsed dict
+```
+
+`detect_provenance()` already does a generic `json.loads()` on the whole marker blob `[Codebase: fetch-ep-review.py:377-386]` — no fetcher code change is needed once the marker itself carries the new fields. The only real work is upstream: `provenance.py`'s `capture` subcommand gains three new optional flags, and `ai-skills`'s publish step (which already calls this exact script) passes them.
+
+#### Planning-review: eval-summary extraction
+
+```mermaid
+sequenceDiagram
+    participant Harness as agent-eval-harness (evals/review/)
+    participant Adapter as evals/lib adapter (new)
+    participant Repo as osac-workspace git (evals/results/latest/)
+    participant FS as fetch-eval-summary.py
+
+    Harness->>Harness: score.py judges (per case: verdict, cost, duration)
+    Adapter->>Harness: read results/{run_id}/, cases/*/annotations.yaml
+    Adapter->>Adapter: compute kappa, FPR, FNR across cases_total
+    Adapter->>Repo: write evals/results/latest/summary.json (overwrite)
+    FS->>Repo: gh api repos/osac-project/osac-workspace/contents/evals/results/latest/summary.json
+    Repo-->>FS: summary.json
+    FS->>FS: emit judge/human agreement metrics
+```
+
+This path has a real prerequisite gap: OSAC-2264 (judges/thresholds, still `TBD` in both eval YAMLs) and populated golden cases (`cases/prd/`, `cases/design/` are currently empty placeholders) must land before κ/FPR/FNR have anything to compute from. This design defines the contract those efforts write into; it does not shortcut them (see Non-Goals).
+
+#### DevOps Engineer viewing a dashboard
+
+A DevOps Engineer opens the "Bug Fix Flow Evaluation" or "Feature Development Flow Evaluation" page in Org Pulse's AI Impact module, sees KPI tiles/trend/distribution for the role-scoped Bot/Model selector's current selection, and switches the dropdown to compare a different bot the same way they would change the time range — no new page or re-navigation, per the PRD's own framing. Missing-data states (`[Locked: D3]`) render distinctly per tile rather than as blank or zero, and bots without attributed identity appear under an explicit "unattributed" grouping (`[Locked: D8]`) rather than being hidden.
 
 ### API Extensions
 
-None. This design adds no CRDs, gRPC services, REST endpoints, webhooks, or finalizers to `fulfillment-service` or `osac-operator`. All new surfaces are workspace-native files (YAML eval configs, shell scripts, schema definitions in `evals/lib/`), additive eval-trend tabs in the existing Org Pulse / `org-pulse-data` pipeline, and a new agent-attribution segmentation dimension on UOI's existing Issue Cycle Time/PR Cycle Time tabs (Konflux DevLake — see Operational metrics platform). There is no OSAC public/private API surface to extend.
+This Feature introduces no gRPC service, no CRD, no webhook, and no finalizer — it touches no `fulfillment-service` or `osac-operator` surface. The only "API" affected is `org-pulse-core`'s pre-existing, incidental per-module `GET /api/modules/<slug>/data` route `[Locked: D2]`, which this design does not modify or depend on as a contract — it is a byproduct of adding data to a module that already exists on that platform. The actual extension surface is the **data contract** each of the three upstream systems must emit into, detailed in Implementation Details below.
 
-### Implementation Details/Notes/Constraints
+## UX Alignment
 
-**Architecture.** Planning-phase evals live in `evals/review/` inside `osac-workspace` — workspace-native, not a bootstrapped component repo. They run from the workspace root and consume skills and `.design/context/` already present here, plus `enhancement-proposals/` via `./bootstrap.sh`.
+No `osac-ux/libs/ui-components/src/api/v1/<resource>.ts` file exists for this Feature, and none is expected — this is an internal engineering dashboard consumed by OSAC's own team (Lead Engineer, Product Owner, DevOps Engineer), not a tenant-facing OSAC resource type with a corresponding proto/CRD. This section is not applicable.
 
-```text
-osac-workspace/
-  evals/
-    README.md                 # prerequisites, how to run all eval types
-    review/                    # Phase 1 - planning-phase review evals
-      eval-prd-review.yaml
-      eval-design-review.yaml
-      run-eval.sh
-      harness.lock              # pins agent-eval-harness v1.22.0 — score.py dependency only, no local execution
-      cases/
-        prd/*/
-        design/*/
-      docs/                     # measurement-taxonomy.md, case-schema.md
-      lib/                      # case validation, report aggregation (thin, not a scoring engine)
-      results/                  # run output; baseline/ committed, others gitignored
-    run-all.sh                  # Phase 2 - orchestrates review + external bugfix eval
-  .claude/skills/prd-review/    # invoked by the EP Review Bot's own pipeline, not by this harness
-  .claude/skills/design-review/
-  enhancement-proposals/        # bootstrapped; source of reference case documents and golden-case PRs
+## Implementation Details/Notes/Constraints
+
+### Bot Metric Record (canonical shape)
+
+Every extended fetcher emits records shaped around the same conceptual fields, so the frontend can render KPI tiles/trend/distribution identically across roles regardless of which fetcher produced the data. Each metric group carries its own `state` so partially-instrumented bots (the norm today, per Motivation) still render correctly:
+
+| Field group | Fields | `state` values |
+|---|---|---|
+| `botIdentity` | `name`, `version`, `model` | `reported`, `unattributed` |
+| `cost` | `totalUsd`, `modelSpendUsd`, `runtimeSpendUsd`, `retryReworkUsd`, `humanReviewMinutes` | `reported`, `not_yet_reported` |
+| `reliability` | `attempts`, `successes`, `retryCount` | `reported`, `building_baseline` (below minimum sample size) |
+| `ci` (Bug Fix Flow, Implementation only) | `firstTimePass`, `failureType` (`unit`\|`lint`\|`build`\|`integration`\|`none`) | `reported`, `not_yet_reported` |
+| `judgeAgreement` (Planning-review only) | `kappa`, `falsePassRate`, `falseNegativeRate`, `nGoldenCases` | `reported`, `not_yet_reported` (harness/cases not yet configured) |
+| `continuousImprovement` | `executionTraceCaptured` (bool), `humanOverrideCaptured` (bool) | `reported`, `not_yet_reported` |
+
+`reliability.retryCount`'s meaning is role-specific: for Bug Fix Flow and Implementation it is retries within `jira-ai-issue-solver`'s feedback-round cost entries; for Planning-generation it is the count of `ai-skills`' own REASSESS/FIXUP revision cycles before merge — directly answering the Product Owner's "does an autonomously generated PRD/design need fewer revision cycles" user story. `[Research: Domain 2]` notes this cycle count exists internally in `ai-skills`' state machine today but is not yet externally exposed as a count — closing this is the same kind of upstream ask as Planning-generation's cost/duration fields, and should be added via the same `provenance.py capture` flag extension (`--revision-count`) rather than a separate mechanism.
+
+`continuousImprovement` answers the DevOps Engineer's user story on whether execution traces and human-override signals are being captured *completely* — it is a completeness indicator, not the traces themselves (raw traces are never displayed on the dashboard; Predictive/closed-loop use of them is explicitly out of the PRD's scope). `humanOverrideCaptured` is `true` today for Bug Fix Flow (the existing `jira-triage-human-assigned` label already signals a human took over `[Codebase: fetch-autofix.py:74-75]`) and for Planning-review (human-override-rate, described below). It is `not_yet_reported` for Planning-generation until a human-edit-before-merge signal is added (e.g., diffing the bot's initial commit against the merged PR). `executionTraceCaptured` is `reported` only for Planning-review today — `agent-eval-harness` already writes per-case traces (`traces: {stdout, stderr, metrics}` in both eval YAMLs `[Codebase: evals/review/eval-prd-review.yaml:53-56]`). Whether `jira-ai-issue-solver` or `ai-skills` retain any durable execution trace beyond their ephemeral run environment is **not confirmed** by this design's research — flagged as a Risk below rather than assumed either way.
+
+`state` is never absent — a group with no data still appears with `state: not_yet_reported` (or the group-appropriate equivalent) and null values, satisfying `[Locked: D3]` at the schema level rather than leaving it to frontend inference. Example, a Bug Fix Flow record today, before bot-identity instrumentation lands:
+
+```json
+{
+  "issueKey": "OSAC-3453",
+  "prUrl": "https://github.com/osac-project/osac-operator/pull/512",
+  "botRole": "bug_fix_flow",
+  "botIdentity": { "state": "unattributed", "name": "jira-ai-issue-solver", "version": null, "model": null },
+  "cost": { "state": "reported", "totalUsd": 4.82, "modelSpendUsd": 4.82, "runtimeSpendUsd": null, "retryReworkUsd": null, "humanReviewMinutes": null },
+  "reliability": { "state": "reported", "attempts": 2, "successes": 1, "retryCount": 1 },
+  "ci": { "state": "reported", "firstTimePass": false, "failureType": "unit" }
+}
 ```
 
-Case/judge patterns are adopted from `agent-eval-harness` (https://github.com/opendatahub-io/agent-eval-harness) and from the sibling `osac-bugfix-eval` harness, without mirroring bugfix's `deps/`, `workspace-template/`, or per-case repo SHA pinning — review evals score already-posted PR comments with no external repo state to pin. `preflight.py`/`workspace.py`/`execute.py`/`collect.py` (the harness's execution-layer scripts) are not used; only `score.py judges` is invoked, against artifacts this design's own fetch step writes directly.
+`runtimeSpendUsd`, `retryReworkUsd`, and `humanReviewMinutes` are null-with-`reported`-state here deliberately: `jira-ai-issue-solver`'s cost comment currently reports total model spend only, not a runtime/retry/human-review breakdown. `[Assumption]` Treat sub-fields not yet separable from a bot's current emission as null within an otherwise-`reported` group rather than blocking the whole group on `not_yet_reported` — the total is still real and usable, and it's the only place in the schema this ambiguity arises.
 
-**Scoring model.** `prd-review`: 0–2 per dimension, `/10` total, PASS ≥7 with no zero on any dimension. `design-review`: 0–2 per dimension, `/8` total, PASS ≥5 with no zero on any dimension. Primary scoring is harness-native judges declared in `eval-prd-review.yaml`/`eval-design-review.yaml`:
+### `bot-roles.yaml` (new, `org-pulse-data`)
+
+A single declarative file, read by all three fetchers and re-exported as its own `bot-roles.json` for the frontend selector, so role-scope membership (the PRD's four Bot/Model selector groups) is data:
 
 ```yaml
-judges:
-  - name: rubric_scoring          # deterministic check judge; regex-parses the skill's own rubric table
-  - name: critical_findings_recall # deterministic check judge; fuzzy-matches annotated critical findings
-  - name: qualitative_finding_quality # LLM prompt judge; only judge affected by model-family choice
-thresholds:
-  rubric_scoring: { min_pass_rate: 1.0 }
-  critical_findings_recall: { min_pass_rate: 1.0 }
-  qualitative_finding_quality: { min_mean: 3.5 }
+roles:
+  bug_fix_flow:
+    - id: jira-ai-issue-solver
+      match: { source: fetch-autofix }
+  planning_generation:
+    - id: prd-creator
+      match: { source: fetch-ep-review, provenance_field: workflow, value: prd }
+    - id: design-creator
+      match: { source: fetch-ep-review, provenance_field: workflow, value: design }
+  planning_review:
+    - id: ep-review-bot
+      match: { source: fetch-eval-summary }
+  implementation: []  # no bot attributed yet - see Motivation
 ```
 
-Pass criteria include the skill's own zero-dimension auto-fail rule, not a looser tolerance — an eval that is more forgiving than the production skill would validate the wrong thing. Optional thin Python in `evals/review/lib/` exists for case validation and report merging only, never as a second scoring path.
+Adding a bot to an existing role, or populating the currently-empty `implementation` list once a bot starts processing Task-type issues, is a one-line config change — no fetcher or frontend code changes. This directly satisfies Goal 5.
 
-`eval-prd-review.yaml`/`eval-design-review.yaml` carry only `dataset:`, `outputs:`, `models.judge`, `judges:`, and `thresholds:` — there is no `execution:`, `runner:`, `models.skill`, `permissions:`, or `hooks:` block, since nothing under this design executes the skill under test.
+### Bug Fix Flow extension (`fetch-autofix.py`)
 
-**Output capture.** Under this design, `artifacts/review-output.md` is populated by fetching the EP Review Bot's already-posted PR comment via the GitHub API and writing its body directly to that path — not by locally executing the skill. Harness `outputs.path` must still target the containing directory (`artifacts`), not the file itself — pointing `outputs.path` at a file silently prevented judges from reading the collected content (a bug in the pinned harness v1.22.0, fixed during OSAC-2264's implementation). Judges score the collected `review-output.md` directly, without parsing chat stdout — this holds regardless of whether that file's content came from a live execution or, as here, a fetched bot comment; `score.py`'s `load_case_record()` only requires that the file exists at the expected path.
+Three additive changes, in order of confidence:
 
-**Known coupling risk (accepted for now, fast-follow planned).** `rubric_scoring` and `critical_findings_recall` currently regex-parse the bot's raw markdown comment directly — the only artifact between the bot's output format and a deterministic judge is `score.py`'s file-existence check, not a stable intermediate representation. If the bot's comment formatting changes (a heading rename, a table restructure) independently of the skill's actual rubric logic, these judges can break on a formatting change rather than a real quality regression, and the failure looks identical to a genuine regression until someone investigates. A follow-on story ([OSAC-3256](https://redhat.atlassian.net/browse/OSAC-3256), Epic 1) introduces a `evals/review/lib/parse_bot_comment.py` normalizer that the fetch step (`fetch-bot-comment.sh`, OSAC-2266) runs before writing `review-output.md`, so a bot-format change becomes a parser update in one tested module instead of a silent judge failure. This is deliberately **not** folded into OSAC-2264 (already in review) or OSAC-2266's initial scope (not yet started, ships the raw-fetch path first) — it is scoped as its own fast-follow so Epic 1's baseline is not blocked on it.
+1. **PR discovery (new capability).** `fetch-autofix.py` calls only Jira's issue-search API today — it has no PR awareness `[Codebase: fetch-autofix.py:17-52]`. Add a per-issue call to `GET /rest/api/3/issue/{key}/remotelink`, the same endpoint `fetch-ep-review.py`'s `fetch_remote_links()` already calls successfully `[Codebase: fetch-ep-review.py:315-320]`. Generalize `filter_ep_prs()`'s URL-substring filter (currently hardcoded to `"enhancement-proposals"`) into a parameter, so the same helper serves both fetchers against their respective target repos.
+2. **Cost/retry parsing (port existing logic).** `jira-ai-issue-solver` already posts a machine-parseable `<!-- AI-BOT-COST -->` markdown table with a round-trip parser in its own codebase (`executor/costcomment.go`'s `parseCostComment()`) and a `[AI-BOT-STATUS]`-marked retry/failure comment (`executor/statuscomment.go`) `[Research: Domain 1]`. Port the same table-parsing logic into Python inside `fetch-autofix.py`; treat a parse failure (format drift, comment absent) as `cost.state = not_yet_reported`, never a fetcher crash.
+3. **Bot identity (cross-repo dependency, not a fetcher change).** No per-run model/provider field exists anywhere in `jira-ai-issue-solver` today — `ai_provider`/`model` are static deployment config `[Research: Domain 1]`. This design records the field as `unattributed` until an upstream change lands. Two implementation options exist for that upstream change (see Alternatives): add a `Model` row to the existing cost-comment table, or a new sibling marker. This design recommends the former for parser-reuse consistency but leaves the final call to whoever owns that PR against `jira-ai-issue-solver`'s deployment (flagged in Open Questions).
 
-**Golden dataset lifecycle.** A fixed golden set drifts out of date as engineering standards, rubric expectations, and the shape of real EP PRs evolve — "measuring against 2026 engineering standards in 2028" is a real failure mode for any eval framework, not just this one. This design commits to a lifecycle, not just an initial curation pass (OSAC-2265): maintain **at least 3 PRD and 3 design active cases** (the Q3/Q6 floor OSAC-2265 already curates — raising this floor is a later-phase decision, not a Phase 1 blocker), review the set at least **every `rubric_version` bump or every 12 months, whichever comes first**, and replace any case whose source PR no longer reflects current architecture/rubric conventions. This review is folded into the quarterly human recalibration below, not run as a separate process. `annotations.yaml`'s `rubric_version` field (already required, OSAC-2265) is the version marker this lifecycle keys off.
+`fetch-autofix.py`'s JQL also broadens from `issuetype = Bug` to `issuetype in (Bug, Task)` so Implementation-stage data has somewhere to land the moment a bot starts processing Tasks — today this simply returns zero additional rows, which is the correct "building baseline, zero attributed bots" state for that role group.
 
-**Evaluation cadence (decided).** Since this design has no pre-merge gate to trigger on (Motivation, Non-Goals), the judge-scoring run uses four trigger types instead, distinguished by an explicit `run_purpose` field on every `eval_run` record: `baseline | scheduled | change_validation | diagnostic | rolling_sample`. `baseline`, `scheduled`, successful `change_validation`, and `rolling_sample` runs all feed Org Pulse — but `rolling_sample` renders on its own, explicitly lower-confidence trend line, never blended with the calibrated baseline/scheduled/change_validation line (Story 4.01's ingest filter). `diagnostic` runs stay in raw results but never reach leadership trends at all, so repeated troubleshooting attempts can't quietly skew the dashboard.
+### Planning-generation extension (`provenance.py`)
 
-1. **Change-driven (`change_validation`).** A full golden-set run is required after any material change to the reviewed skill/rubric, the EP Review Bot's prompt/model/context assembly/output format, the judge prompt or judge model, the parser/scoring logic, or the golden-case annotations/reference reviews. Because this design never re-executes the bot locally, this is post-deployment verification, not a pre-merge gate: the earliest a change can be scored is once the bot has produced — or been re-triggered via `/review-ep` to produce — a fresh comment on each golden-case PR. "Required" means the change isn't considered measurement-validated until the run completes, not that it blocks the merge that caused it.
-2. **Scheduled (`scheduled`).** A weekly workflow (early Monday, ahead of Story 4.02's weekly report) evaluates any golden case whose **input fingerprint** has changed since its last scored result, and re-scores a small rotating sample of unchanged cases to monitor judge repeatability. A case's input fingerprint is `case_id` + bot-comment content hash + `rubric_version` + judge model + judge prompt version + `reference-review.md`/`annotations.yaml` version + scoring-code version — deliberately **not** the bot's own internal model/config version, which this design doesn't pin or reliably observe for any given run (see Motivation, Security Considerations). If no tracked input changed, the previous result is reused instead of re-scored: repeatedly re-sending an unchanged bot comment to the LLM judge would measure judge nondeterminism, not production drift.
-3. **Rolling sample (`rolling_sample`).** A bounded weekly job — same cron as the scheduled trigger — samples a fixed, small N (default 5) of the most recent real `enhancement-proposals` PRs the golden set was never curated from. Each is scored by `rubric_scoring` (deterministic, needs no human reference) and `qualitative_finding_quality` (quality-only read); `critical_findings_recall` is skipped, since it requires curated `annotations.yaml` findings no real PR has. This is a different signal from trigger 2's rotating repeatability sample: that one re-scores a few *unchanged golden cases* to catch judge nondeterminism; this one catches drift on PRs the golden set structurally can't see. Bounding the sample size keeps judge-call cost predictable rather than proportional to all real PR volume. Resolves this design's former Open Question #2. Tracked on [OSAC-3259](https://redhat.atlassian.net/browse/OSAC-3259).
-4. **Diagnostic (`diagnostic`).** Manual, case-level or judge-level runs remain available at any time — investigating a failed scheduled run, validating a newly-authored case before it joins the golden set, or debugging a parser/rubric mismatch. Excluded from Org Pulse trends by construction (`run_purpose: diagnostic`), not by convention.
+`provenance.py`'s `capture` subcommand gains three new optional CLI flags — `--cost-usd`, `--duration-seconds`, `--model` — persisted as new optional keys on the existing event object in `provenance.json`'s `schema_version` (bumped to 2, additive: old logs without these keys remain valid) and carried through to the rendered `<!-- ai-workflow-provenance:{...} -->` footer. Because `eranco74/ai-skills` already calls this exact shared script for its own publish step `[Research: Domain 2]`, and because `fetch-ep-review.py`'s `detect_provenance()` already does a generic `json.loads()` of the whole marker (not a fixed-field parse) `[Codebase: fetch-ep-review.py:377-386]`, this is the lowest-risk extension in the design: one shared file changes once, and the fetcher needs zero changes to start surfacing the new fields once `ai-skills` starts passing them.
 
-A **quarterly human recalibration** review re-checks judge/human agreement and golden-set representativeness on a fixed schedule regardless of what the automated cadence shows, and triggers early if Cohen's κ drops below OSAC-2267's threshold, the rubric materially changes, the case mix changes, the judge model changes, or systematic false positives/negatives are observed. This is the lifecycle the Golden dataset lifecycle paragraph above refers to — a recurring coordination task ([OSAC-3258](https://redhat.atlassian.net/browse/OSAC-3258), parented alongside OSAC-2518's coordination pattern) tracks scheduling and findings. The scheduled/change-driven cadence mechanics themselves (run_purpose, input-fingerprint caching) are [OSAC-3257](https://redhat.atlassian.net/browse/OSAC-3257).
+This workspace's own manual `/prd:draft`/`/design:draft` skill invocations could optionally start passing the same flags (Claude Code CLI session cost is available to the calling skill) — this is a nice-to-have, not required by any locked decision, since the PRD's Dependencies section names OSAC-3168's workstream as the one that must emit this data, not this workspace's own manual authoring sessions.
 
-**Judge-model policy (detail, decided 2026-07-23).** `eval-prd-review.yaml` and `eval-design-review.yaml` pin a single `models.judge: claude-sonnet-4-6` for both the team-default fallback and the one LLM judge (`qualitative_finding_quality`) — no per-judge override. An earlier iteration of this decision split the two (`models.judge: claude-opus-4-6` default, with a per-judge override restoring just `qualitative_finding_quality` to `claude-sonnet-4-6`), reasoned about below; it was superseded by this single-model policy for config clarity, since the split bought only a partial mitigation (see next paragraph) at the cost of an extra moving part to maintain. `rubric_scoring` and `critical_findings_recall` are deterministic regex judges unaffected by model choice either way. There is no `models.skill` to pin under this design — the text being judged is the EP Review Bot's own already-posted comment, produced by whatever model its production pipeline (`agentic_ci`/Vertex AI, OSAC-1773's own configuration) used on that run, which this design does not control, pin, or necessarily know precisely for any given case.
+### Planning-review extension (`evals/` adapter + `fetch-eval-summary.py`)
 
-Splitting the judge model from the team default would not have been a complete fix in any case, and is documented here as context for why it was tried and dropped rather than kept as a permanent hedge: industry research on LLM-as-judge bias (2026) distinguishes *self-preference bias* (the exact same model grading its own output) from a separate, also-documented *family bias* (same provider/training lineage, different model favored regardless). The published evidence for self-preference bias (Zheng et al.; Panickssery et al.) is strongest for *pairwise* comparison judging; this judge instead scores a single output against a fixed human reference on an absolute scale, where the more plausible transfer risk is *style-familiarity*/family bias — rewarding AI-typical structure over the human reference's style, which could skew a score in either direction, not just inflate it. An Opus/Sonnet split would have crossed the self-preference line (different model) but not the family-bias line (both Anthropic) — a genuinely bias-resistant judge would need a different **provider** (e.g. GPT, Gemini). That option was evaluated and rejected: the pinned harness's `score.py` hardcodes an Anthropic-only LLM client (`_get_anthropic_client()` → `anthropic.Anthropic`/`AnthropicVertex`, no LiteLLM/OpenAI routing), so cross-provider judging would mean patching that pinned upstream dependency or building a second non-harness judge-calling path — both conflict with this design's core principle of consuming `score.py`'s judge orchestration as-is (OSAC-2264 AC-6: no standalone scorer.py duplicating harness judge logic). Since a same-provider model split doesn't reach genuine family-bias separation anyway, it was dropped in favor of one model and one clear config.
+`evals/lib/unified-report.schema.yaml` already exists with a `feed_type: eval_run` field explicitly described as an "Org Pulse ingest discriminator" `[Codebase: evals/lib/unified-report.schema.yaml:24-27]`, but no adapter script produces it yet — `evals/lib/bugfix-ingest.md`'s own kickoff checklist still has "Implement adapter + unit test against fixture" unchecked, and the README defers this to "Phase 2." This design specifies the extension to that already-planned schema and builds the missing adapter, rather than treating either as a green field:
 
-The primary trust mechanism therefore is **calibration against the human-authored cases OSAC-2265/OSAC-2267 curate**, with an explicit, quantified bar instead of a qualitative "tracks human judgment" check: **Cohen's κ between judge scores and human annotations on the golden set — κ ≥ 0.6 is acceptable, κ ≥ 0.8 is strong; κ < 0.5 means the rubric/prompt needs rework, not the model** (industry-standard thresholds; computed and reported in OSAC-2267's baseline). This calibration step, not the choice of judge model, is what establishes trust in the score.
+1. **Schema addition** to `workflow_aggregate` for `prd-review`/`design-review` workflows, mirroring the existing bugfix-only `fix_correctness_mean` pattern:
 
-**Operational metrics platform (detail, decided 2026-07-28).** MTTR and PR velocity (Phase 3) are delivered as an agent-attribution extension to UOI's (Konflux DevLake) existing **Issue Cycle Time** and **PR Cycle Time** tabs, not as a new or extended `org-pulse-data` fetcher — per Eran Cohen's direction on [OSAC-2261](https://redhat.atlassian.net/browse/OSAC-2261) (2026-07-16): UOI already ingests the Jira/GitHub data these formulas need ("I think we get most of this... I'm fine with extending it to capture additional metrics... e.g. number of commits/PRs by autonomous agents"). This changes what Epic 3 actually delivers: not a Jira/GitHub fetcher and a new `evals/lib/ops-metrics-feed.schema.yaml` feed, but the MTTR/velocity **formulas and agent-attribution rules** (documented in `evals/review/docs/measurement-taxonomy.md`: agent-labeled bugs for MTTR via Jira labels, PR-label → `Assisted-by:` trailer → bot/service-account priority for velocity) plus the Konflux DevLake coordination to add an agent-vs-human segmentation dimension to those two existing tabs. `evals/lib/ops-metrics-feed.schema.yaml` is retired as a deliverable — there is no workspace-native feed for Org Pulse to ingest for these two metrics, since UOI is the system of record and display. Org Pulse's own new tabs (Phase 4) are scoped to harness eval trends only (`eval_run`); the weekly report (Story 4.02) links UOI's extended tabs for MTTR/velocity alongside Org Pulse's eval trend tabs, the same pattern already used for the FTPR reference link.
+   ```yaml
+   judge_human_kappa: { type: number, description: "Cohen's kappa, judge verdict vs. annotations.yaml expected_verdict" }
+   false_pass_rate: { type: number }
+   false_negative_rate: { type: number }
+   n_golden_cases: { type: integer }
+   ```
 
-**Phasing.**
+2. **New adapter script** (`evals/lib/generate-unified-report.py`) reads a completed harness run's per-case verdicts from `evals/review/results/{run_id}/` and each case's `annotations.yaml` `expected_verdict` (ground truth), computes κ/FPR/FNR across the run's cases, reads OSAC-516's `osac-bugfix-eval` `summary.yaml`/`run_result.json` per the contract `evals/lib/bugfix-ingest.md` already documents, and writes the combined report. A small, **not gitignored** rollup — `evals/results/latest/summary.json`, overwritten each run rather than the full per-run history under `evals/results/{run_id}/` — is committed to `osac-workspace` so `org-pulse-data` can read it.
+3. **`fetch-eval-summary.py`** (new, sibling to the two existing fetchers rather than folded into `fetch-ep-review.py`, since it reads golden-set calibration output, not live PR reviews) fetches `evals/results/latest/summary.json` via `gh api repos/osac-project/osac-workspace/contents/evals/results/latest/summary.json` — the identical `gh api .../contents/...` pattern `fetch-ep-review.py`'s `fetch_file_content()` already uses, just against this workspace's repo instead of `enhancement-proposals`.
+4. **Human-override rate — no new upstream emission needed.** `fetch-ep-review.py`'s existing output already carries `humanReviewStatus`, `recommendation`, and PR merge state `[Codebase: fetch-ep-review.py build_feature_entry/build_index_entry]`. Computing "how often did a human's outcome disagree with the bot's PASS/FAIL recommendation" is new aggregation logic inside the existing fetcher, not a new data source — this is the one Planning-review Key Metric available immediately, independent of the OSAC-2264/golden-case sequencing dependency above.
+5. **Review-rationale trace completeness** is likewise computable today, directly from harness output structure: whether `artifacts/review-output.md` exists and is non-empty for a given case run — no new emission required.
+6. **Cost per review** depends on whether `agent-eval-harness`'s already-configured `traces.metrics: true` (set in both `eval-prd-review.yaml` and `eval-design-review.yaml` today `[Codebase: evals/review/eval-prd-review.yaml:53-56]`) already captures per-case cost the way bugfix's `run_result.json` does. This design assumes it does and reads it accordingly; if it doesn't, that is a gap in `agent-eval-harness` itself, external to this design, tracked as Open Question 2.
 
-| Phase | Deliverable | Location |
-|---|---|---|
-| 1 | PRD + design review eval harness, baseline report | `evals/review/` |
-| 2 | Unified reporting with `osac-bugfix-eval` | `evals/run-all.sh` + adapter, `evals/lib/unified-report.schema.yaml` (`feed_type: eval_run`) |
-| 3 | Jira + GitHub operational metrics | Agent-attribution extension to UOI's Issue Cycle Time / PR Cycle Time tabs (Konflux DevLake); formulas in `measurement-taxonomy.md` — no workspace-native fetcher or feed (see **Operational metrics platform**) |
-| 4 | Org Pulse eval trends + weekly reports | Org Pulse gains new tabs for harness eval trends only (`eval_run`); weekly report links UOI's (extended) tabs for MTTR/velocity — coordinated via OSAC-2518 |
+### Dashboard pages
 
-The Phase 4 weekly report is a purpose-built pipeline reading Org Pulse's `eval_run`-derived eval trends and linking UOI's (extended) tabs for MTTR/velocity — distinct from the workspace's unrelated `generate-status-report` skill, which produces a personal 1:1 activity digest from an individual's own PRs/Jira, not agent-performance-trend reporting. [Clarify: R1.Q5] [Locked: D5]
+Both new pages are added as tabs within Org Pulse's **existing** "AI Impact" module (the same module Autofix and EP Review data already live in), not as new standalone `org-pulse-core` modules — see Alternatives for why. "Bug Fix Flow Evaluation" reuses the existing KPI-tile/trend/distribution template with one role-scoped Bot/Model selector. "Feature Development Flow Evaluation" stacks three independent sub-sections — Planning: generation, Planning: review, Implementation — each with its own selector, KPI tiles, trend, and distribution chart, matching the PRD's own three-selector diagram for that page. Exact tile layout, colors, and component-reuse-vs-extension decisions are explicitly out of the PRD's scope and are an implementation detail for whoever builds the frontend change — this design specifies the states and data shape that layout must render (the Bot Metric Record's `state` values above), not its visual form.
 
-**Schema shape.** `evals/lib/unified-report.schema.yaml` (`feed_type: eval_run`, already implemented) is a top-level report keyed by `run_id` and `timestamp`, containing a `workflows` array — one entry per `prd-review`/`design-review`/`bugfix` workflow, each with a `gate` name, a `pass`/`fail`/`partial`/`skipped` `result`, and a `cases` array of per-case `case_id`/`passed`/`verdict`/`scores` — plus an `aggregate` object with `overall_pass_rate`. Per-case cost/duration tracking already exists in this schema for the bugfix workflow (`run_result.cost_usd`, `num_turns`, `duration_s`) but is not yet populated for `prd-review`/`design-review` cases — Story 4.03 (per-run cost telemetry) extends this same `run_result` shape to the review workflows rather than adding a new field, keeping the schema addition additive as the PRD's cost-telemetry scope note requires. `evals/lib/ops-metrics-feed.schema.yaml` — proposed in an earlier iteration of this design for a Phase 3 MTTR/velocity feed — is retired: per **Operational metrics platform** below, these metrics render directly on UOI's own (extended) tabs, so there is no workspace-native feed for Org Pulse to ingest for them.
+Each page includes a link out to the existing UOI (Konflux DevLake) view for MTTR and PR velocity — `[Locked: D6]` — rather than rendering those numbers on the new pages. This satisfies the Lead Engineer and Product Owner user stories referencing MTTR/velocity without duplicating a metric this Feature does not own.
 
-**Dependency detail beyond what's in the PRD:** OSAC-2007 (EP Review Data Pipeline) already dashboards the EP Review Bot's scores in Org Pulse today — Phase 4 must define the *delta* against that existing pipeline, not duplicate it. `osac-bugfix-eval` lives on a personal fork (`eranco74`) with no organizational backup and no commits since 2026-06-03; Epic 2's adapter work should include a liveness check before hard-wiring to it.
+The rolling 8-week trend chart on both pages is a client-side display window over the same unbounded, overwrite-pattern JSON history `org-pulse-data` already retains for its other trend charts (e.g., Autofix) — no new retention or purge infrastructure is introduced to support it. `[Locked: D7]`
 
-### Security Considerations
+## Security Considerations
 
-The harness's LLM judge (`qualitative_finding_quality`) sends the EP Review Bot's already-posted PR comment plus the case's human-authored reference review to an external LLM API (`claude-sonnet-4-6` via the configured provider) for scoring. This is a strictly smaller data-exposure footprint than an earlier iteration of this design: there is no second skill-under-test execution sending full PRD/design document content to a second LLM call — only the bot's own already-public PR comment and the golden reference review are sent. This is the same data-exposure profile the EP Review Bot already has in production today for its half of the exchange — no new exposure is introduced. No credentials, secrets, or tenant data pass through this path.
+No new authentication or authorization surface. The extended fetchers use the same Jira service-account credentials and the same GitHub API access (`gh` CLI, already authenticated in `org-pulse-data`'s CI) that `fetch-ep-review.py` already uses today — the only change is which repos/paths are read (`fetch-autofix.py` gains read-only PR-comment access to whatever repos `jira-ai-issue-solver` opens PRs against; `fetch-eval-summary.py` gains read-only contents access to `osac-project/osac-workspace`). No new write scope is introduced anywhere in this design — every fetcher remains read-only against Jira/GitHub, consistent with `org-pulse-data`'s existing model. Org Pulse's own platform-level authentication for the AI Impact space is unchanged; this Feature adds pages within that existing boundary.
 
-**Credential provisioning.** Harness runs (`evals/review/run-eval.sh`) need two credentials: (1) a GitHub token to fetch the bot's already-posted PR comment (read-only; the engineer's own `gh` auth locally, or `GITHUB_TOKEN` in CI) — no write access needed, since this design never posts anywhere; (2) the engineer's own already-configured Claude Code credentials for the `qualitative_finding_quality` judge call — the same mechanism as any other Claude Code skill invocation in this workspace. Manual/diagnostic runs provision no new secret for either. The CI smoke check (`evals-review-smoke.yml`) stubs both and skips the judge call entirely, so no CI-scoped LLM credential exists yet — but now that Evaluation cadence (Implementation Details) decides the scheduled and change-driven triggers run in CI, provisioning a CI-scoped credential for `qualitative_finding_quality` is a planned requirement, not an if-pursued follow-on. It reuses the same GCP SA / `AnthropicVertex` pattern `enhancement-proposals/.github/workflows/ep-review.yml` already provisions for the bot's own judge call, scoped to the repo that runs the scheduled harness workflow (`osac-workspace`), rather than a new vendor integration. Tracked on [OSAC-3257](https://redhat.atlassian.net/browse/OSAC-3257) (Implementation Details: Evaluation cadence); no longer entangled with OSAC-3010, which does not govern this design's (nonexistent) execution mode. See Infrastructure Needed.
+## Failure Handling and Recovery
 
-There is no `permissions.deny` block under this design — that mechanism existed to sandbox a locally-executed skill from mutating live Jira/GitHub state during an eval run, and there is no local skill execution left to sandbox. The harness's only external interaction is a read-only GitHub API fetch of an already-posted comment (`gh api .../issues/{pr}/comments`, GET only); it never writes to a PR, issue, or Jira ticket.
-
-No new authentication or authorization model is introduced. This framework does not touch OSAC's tenant-isolation model (`osac.openshift.io/tenant`, `osac.openshift.io/owner-reference`) because it produces no tenant-facing resources — see RBAC / Tenancy below.
-
-### Failure Handling and Recovery
-
-| Failure mode | What happens | Recovery | User-visible effect |
+| Failure mode | Detection | Recovery | User-visible effect |
 |---|---|---|---|
-| LLM API call fails/times out (judge call) | Harness run exits non-zero for that case | Re-run the case; no partial report is written | Engineer sees a failed run, not a silently-wrong score |
-| Harness process crashes mid-suite | No results file for the interrupted run | Previous `results/baseline/` remains the comparison point; re-run from scratch (runs are not resumable mid-suite) | Baseline is never overwritten by a partial run |
-| A judge's deterministic `check` throws (e.g., malformed rubric table in the bot's posted comment) | That case fails `rubric_scoring` | Treated as a genuine regression in the bot's output format, not the harness | Engineer investigates the skill/bot, not the harness |
-| A golden-case PR's bot comment doesn't exist yet, or was deleted | That case can't be scored this run | Trigger the bot manually via the `/review-ep` slash command (`ep-review.yml` supports this), then re-run | Case is skipped with a clear reason, not silently scored against stale/missing data |
-| `rubric_scoring` runs against a bot-sourced `prd-review` case before [OSAC-3123](https://redhat.atlassian.net/browse/OSAC-3123) lands | Judge would mismatch on every case (schema mismatch, not a quality signal) | Judge is skipped for `prd-review` cases via the `annotations.yaml` opt-out until OSAC-3123 resolves; `design-review` is unaffected | Baseline report notes `prd-review` coverage is partial (2 of 3 judges) until the fix lands |
-| `osac-bugfix-eval` fork becomes unreachable (Phase 2) | Adapter ingestion fails at fetch time | Falls back to the last successfully ingested `summary.yaml`; does not block Phase 1 harness runs, which are independent | Bug-fix trend data goes stale until the fork is reachable again or migrated |
-| Org Pulse ingestion pipeline fails (Phase 4) | New eval trend tabs show stale data | Existing Org Pulse alerting/on-call for pipeline failures applies unchanged — this design adds no new pipeline infrastructure, only new tabs into the existing one | Dashboard viewers see a stale-data indicator already produced by Org Pulse's existing mechanism |
-| UOI/Konflux DevLake pipeline fails or its agent-attribution dimension is misconfigured (Phase 3) | Issue Cycle Time/PR Cycle Time tabs show stale or unsegmented data | UOI's existing on-call/alerting applies unchanged — this design adds a segmentation dimension to an existing pipeline it does not own or operate | Weekly report's MTTR/velocity link shows the same stale-data behavior UOI already has for other teams |
+| PR-comment format drifts upstream (`jira-ai-issue-solver` changes its table format) | Parse function returns no match | Fetcher logs a warning (existing `print()`-based pattern) and sets `cost.state`/`reliability.state` to `not_yet_reported`; does not raise | Bug Fix Flow tile reverts to "not yet reported" rather than showing stale or wrong numbers |
+| Provenance marker missing or malformed JSON | `detect_provenance()` already returns `None` safely today `[Codebase: fetch-ep-review.py:377-386]` | Unchanged existing behavior — record falls back to `unattributed`/`not_yet_reported` | No change from today's behavior for PRDs/designs without a marker |
+| `evals/results/latest/summary.json` missing or stale (adapter hasn't run, or harness run failed) | `fetch-eval-summary.py`'s `gh api contents` call 404s, or `lastSyncedAt` inside the file is older than N fetch cycles | Fetcher treats missing file identically to "no data yet"; emits `judgeAgreement.state = not_yet_reported` | Planning-review section shows "building baseline" rather than stale numbers |
+| GitLab CI job for a fetcher fails mid-run | CI job failure (existing GitLab CI failure signal) | Diff-gated commit means a failed run simply does not commit — last-known-good JSON stays live | No dashboard impact; data is one cycle stale until the next successful run |
+| Sidecar poll fails or lags | Existing sidecar failure/lag behavior, unchanged by this design | Existing sidecar retry-on-next-poll behavior | Existing behavior, unchanged |
 
-There is no idempotency concern for read-only review evals — re-running the same case against the same skill/model version produces an independent, non-mutating scoring attempt each time; there is no shared mutable state to corrupt on retry.
+## RBAC / Tenancy
 
-### RBAC / Tenancy
+No RBAC or tenancy changes are required. This Feature has no tenant-facing surface — its only consumers are internal OSAC engineering roles (Lead Engineer, Product Owner, DevOps Engineer), confirmed as a PRD Assumption. `osac.openshift.io/tenant` and `osac.openshift.io/owner-reference` annotations do not apply because no new Kubernetes resource type is introduced. Dashboard access control is Org Pulse's existing platform-level authentication for its AI Impact space, which this Feature adds pages within rather than modifies. `[Locked: D4]`
 
-No RBAC or tenancy changes. This feature produces no new OSAC resources (CRDs, gRPC-managed objects) and has no tenant-observable behavior — confirmed during PRD clarification: its consumers are internal engineering roles (Lead Engineer, Product Owner, DevOps Engineer), not OSAC's tenant-facing personas. [Locked: D1] No `osac.openshift.io/tenant` or `osac.openshift.io/owner-reference` annotations apply because there is no tenant-scoped resource to annotate.
+## Observability and Monitoring
 
-The same no-tenant-surface reasoning means the Documentation, UI, and E2E Testing dimensions in `.design/context/osac-dimensions.md` don't apply either: there is no `osac-ui` console surface (Org Pulse is a separate internal tool, not `osac-ui`), no tenant-facing documentation need, and no `osac-test-infra` pytest coverage requirement — this design's own Test Plan is the equivalent verification layer for its actual (non-tenant) surface.
+This design adds no long-running service and therefore no Prometheus metrics or Kubernetes events — every component is a scheduled batch script inside GitLab CI, the same operational shape `org-pulse-data`'s two existing fetchers already have. The relevant signal is GitLab CI job success/failure for the three fetchers, which already surfaces through whatever CI-failure notification mechanism `org-pulse-data`'s pipeline owners use today; this design does not introduce a new alerting channel. Each fetcher's existing `print()`-based stdout logging (the pattern already in `fetch-autofix.py`) is extended with a per-run count of records landing in each non-`reported` state per role, so pipeline owners can watch instrumentation-rollout progress across the four roles over time without a new dashboard for the dashboard.
 
-### Observability and Monitoring
+## Risks and Mitigations
 
-New signals, delivered via the `eval_run` feed into Org Pulse (eval pass rate, cost telemetry) or via UOI's own extended tabs (MTTR, velocity — see Operational metrics platform) — no new metrics backend in either case:
+| Risk | Mitigation |
+|---|---|
+| PR-comment/markdown-table parsing is string-based, not schema-versioned — `jira-ai-issue-solver`'s own `parseCostComment()` round-trips by string parsing, not JSON `[Research: Integration Constraints]` | Defensive parsing returns `not_yet_reported` rather than crashing on drift (see Failure Handling); if drift becomes frequent, propose a JSON sibling marker to that repo as a follow-up, not a day-one requirement |
+| Model/bot identity emission for Bug Fix Flow and Planning-generation requires upstream changes to two repos this design does not own | `[Locked: D3]`'s "building baseline" states let both dashboard pages ship before either upstream change lands; Bug Fix Flow is sequenced first per research's own recommendation (lowest lift — cost/retry already flow, only identity is missing) |
+| Self-preference bias: if the EP Review Bot's judge model ever matches `prd-creator`/`design-creator`'s generation model, Cohen's κ may read artificially high (inflated false-pass rate on self-generated content) `[Research: Standards and Specifications]` | Display which model is running the judge alongside κ on the dashboard tile itself, so a Lead Engineer can see potential overlap rather than trusting κ blindly |
+| Small-N statistical unreliability: 10 PRD / 6 design golden cases are below the N≈50 floor where bootstrap confidence intervals for κ are considered valid `[Research: Standards and Specifications]` | κ is presented as a directional, small-sample-caveated estimate using the same "building baseline (X/N)" pattern as other under-sampled metrics, never as a pass/fail gate |
+| Planning-review's calibration mechanics (judges, thresholds, golden cases) are not yet configured — a sequencing dependency this design cannot shortcut | Human-override rate and review-rationale-trace-completeness ship immediately (zero new upstream emission needed); κ/FPR/FNR wait on OSAC-2264/OSAC-2267 and show `not_yet_reported` until then |
+| Implementation-stage role group has no confirmed bot in production today (empirically verified via live Jira query) | `bot-roles.yaml` ships with an empty `implementation` list; the role's dashboard sub-section renders the same "building baseline, zero bots" state the framework already handles for under-sampled data, not a special case |
+| Whether `jira-ai-issue-solver` or `ai-skills` retain any durable execution trace beyond their ephemeral run environment is unconfirmed by this design's research | `continuousImprovement.executionTraceCaptured` starts `not_yet_reported` for those two roles rather than assuming completeness; if traces genuinely aren't retained anywhere, that becomes a scoped follow-up ask to each bot's owning workstream, not a silent gap in this dashboard |
 
-- **Eval pass rate** (per skill, per case, trended over time) — a sustained drop below the harness's per-judge thresholds (`rubric_scoring`/`critical_findings_recall` at `min_pass_rate: 1.0`, `qualitative_finding_quality` at `min_mean: 3.5`) indicates a skill or rubric regression.
-- **Confidence alongside every reported score** — a bare pass rate or percentage invites over-trust. Reports and Org Pulse trend tabs pair each score with its sample size (`n`, the golden-case count it's computed over) and the golden set's current judge/human calibration (Cohen's κ, OSAC-2267), so a viewer can tell a well-calibrated result from a thin one instead of reading a percentage as an absolute truth.
-- **Per-run judge-call cost telemetry** (what scoring a batch of golden cases costs in judge LLM calls) — a distinct observability signal from AI-usage billing, added per PRD clarification. [PRD: In Scope] [Locked: D3] There is no skill-execution cost to track under this design; the EP Review Bot's own production invocation cost is OSAC-1773's scope, not duplicated here (see Story 4.03). A sustained per-run cost increase with no corresponding scope change indicates a judge prompt/model regression worth investigating.
-- **MTTR trend** (Phase 3) — agent MTTR defined as time from a bug's "New" state to its first autofix PR; a flattening or worsening trend after an agent-workflow change indicates the change didn't help.
-- **Velocity trend** (Phase 3) — feature development throughput with agent assistance; a large unexplained swing in either direction warrants investigation before being reported to leadership.
+## Drawbacks
 
-If no new observability changes were needed, this section would state that plainly — that is not the case here; these are genuinely new signals layered onto existing pipelines.
-
-### Risks and Mitigations
-
-| Risk | Severity | Mitigation |
-|---|---|---|
-| No pre-merge blocking gate exists, and none is architecturally possible under this design | Low (reframed from a pending decision to a deliberate scope choice) | This is Non-Goals, not a gap: this design only scores already-posted bot output, so there is no pre-merge artifact to gate. OSAC-3010's local-vs-remote execution question is moot for this design specifically (no execution exists to place locally or remotely). Pre-merge regression testing, if ever wanted, is a smaller follow-on scoped to OSAC-2019, not blocked on any infrastructure decision here. |
-| Style-familiarity / family bias in the one LLM `prompt` judge (`qualitative_finding_quality`) — same-provider (Anthropic) grading, since `models.judge: claude-sonnet-4-6` is used for the default and this judge alike | Medium | Quantified human-case calibration (Cohen's κ ≥ 0.6, OSAC-2265/OSAC-2267) is the primary and only mitigation — a same-provider per-judge model split was considered and dropped (see Alternatives) because it doesn't reach genuine cross-provider separation anyway; the pinned harness's `score.py` only supports Anthropic models. Only this one judge is affected — the two deterministic `check` judges are immune by construction. |
-| EP Review Bot's PRD score table uses different criteria than `prd-review`'s own rubric ([OSAC-3123](https://redhat.atlassian.net/browse/OSAC-3123), cross-repo) | Medium | `rubric_scoring` skipped for bot-sourced `prd-review` cases until fixed; `critical_findings_recall` and `qualitative_finding_quality` unaffected; `design-review` has no equivalent bug. |
-| `osac-bugfix-eval` (Phase 2 dependency) lives on a personal fork with no organizational backup and no commits since 2026-06-03 | Medium | Liveness/portability check before Epic 2's adapter hard-wires to it; consider migrating under the `osac-project` org before Phase 2 implementation. |
-| Org Pulse / `org-pulse-data` (Phase 4 eval trends), OSAC-2007 (EP Review Data Pipeline), and UOI/Konflux DevLake (Phase 3 MTTR/velocity, per **Operational metrics platform**) already own adjacent surface area — three systems, three owners | Medium | OSAC-2518 coordination task runs a gap review across all three before Epic 3–4 implementation coding, so new work is additive (new Org Pulse eval-trend tabs, a new UOI segmentation dimension), not duplicate fetchers or a parallel dashboard. A separate GitHub/Jira-native dashboard proposal ([OSAC-2906](https://redhat.atlassian.net/browse/OSAC-2906)) surfaced the same duplication risk independently — folded into the same coordination. |
-| Program-level alignment (phased E2E, indirect RCA accuracy, Epic 3–4 prioritization) was communicated but not yet confirmed by the feature's original requester | Low (process, not technical) | Tracked as a PRD Dependency, not silently assumed; work on Epic 1–2 is not blocked on it per Eran Cohen's own "not blocking" framing, but Epic 3–4 investment should pause for a reply if one hasn't arrived by then. |
-| **Goodhart's Law:** `critical_findings_recall` rewards matching more annotated findings; over time, review output could drift toward exhaustive finding lists optimized for recall rather than genuinely better review judgment | Medium | Not solvable by this design alone — documented here as a known limitation of any recall-based metric. Watch for `qualitative_finding_quality` diverging from `critical_findings_recall` over time as an early signal, and treat that divergence as cause to revisit the rubric, not just the score. |
-| **Reviewer disagreement / golden set is consensus, not ground truth:** each `reference-review.md` encodes one documented human judgment call; a different qualified reviewer could reasonably score a subset of findings differently | Low | Framed explicitly in Terminology as consensus judgment, not an objective standard. The quantified Cohen's κ bar (OSAC-2267) measures agreement with that documented judgment, and every reported score carries its sample size (Observability), so viewers can weigh confidence rather than treat the number as absolute. |
-| Fragile coupling to the bot's raw comment format — deterministic judges regex-parse markdown directly, with no intermediate representation | Medium | Documented as a known coupling risk (Implementation Details: Output capture); a normalizer fast-follow ([OSAC-3256](https://redhat.atlassian.net/browse/OSAC-3256), Epic 1) decouples judges from bot formatting changes without reopening the already-in-review OSAC-2264. |
-| Golden set goes stale as engineering standards and rubric expectations evolve | Medium | Golden dataset lifecycle (Implementation Details) commits to a minimum active-case floor, a review cadence tied to `rubric_version`/12 months, and folds refresh review into the quarterly human recalibration — not left as an unscheduled "we'll refresh eventually" intention. |
-
-### Drawbacks
-
-An earlier iteration of this design ran the skill a second time locally, through a second execution stack (`agent-eval-harness`/Claude Code) alongside the bot's own production stack (`agentic_ci`/GCP Vertex AI) — a real, since-rejected drawback (see Alternatives, and `.artifacts/design/OSAC-959/EPIC1-SCOPE-AUDIT.md` for the full scope-audit analysis). This design instead scores the bot's real output directly, which removes that drawback but introduces different ones:
-
-- **No pre-merge signal.** A skill/rubric regression is only visible after it ships and the bot reviews the next real PR — there is no local check a skill author can run against a draft change first. Accepted because this capability serves a persona (harness maintainer/skill author) explicitly excluded from this PRD [Locked: D2]; it can be re-homed under OSAC-2019 later if the team decides it's worth building for that persona.
-- **Coupling to bot availability and format.** If the bot fails to post a comment on a golden-case PR (rate limit, outage, workflow bug), that case can't be scored until the bot successfully reviews it — there's no local fallback execution path. Mitigated by the `/review-ep` slash-command retrigger `ep-review.yml` already supports.
-- **PRD rubric-schema mismatch ([OSAC-3123](https://redhat.atlassian.net/browse/OSAC-3123)).** The bot's PRD score table uses different criteria names than `prd-review`'s own rubric, so `rubric_scoring` can't run against bot-sourced PRD cases until that cross-repo bug is fixed. `design-review` is unaffected; the other two judges are unaffected either way.
-
-The ongoing cost that remains: a golden dataset that needs curation and occasional refresh, and LLM API cost for the judge calls (`qualitative_finding_quality`) on every scoring run — smaller than an earlier iteration's cost, since there is no second skill-execution LLM call to pay for.
+This design adds Python surface area to a repo (`org-pulse-data`) whose CI this workspace does not control, and asks for changes in two more external repos (`jira-ai-issue-solver`'s deployment/fork, `eranco74/ai-skills`) that no single owner here can force onto a timeline — Bug Fix Flow and Planning-generation's identity/cost gaps close only when those teams act, not when this design ships. String-based PR-comment parsing is inherently more brittle than a real schema or API, accepted here because it reuses a mechanism the bots themselves already treat as durable (`jira-ai-issue-solver`'s own code round-trips its cost comment the same way). The four-role framework is also not fully elastic: the PRD fixes two dashboard pages with a defined selector-group structure per page, so a genuinely new fifth role (not just a new bot within an existing role) would need a page-layout change, not just a `bot-roles.yaml` edit.
 
 ## Alternatives (Not Implemented)
 
-**Custom `scorer.py` instead of harness-native judges.** An earlier iteration of this plan proposed a bespoke Python scorer with ±1 tolerance on the total rubric score. Rejected: `agent-eval-harness` already provides `check` and LLM `prompt` judges with per-judge thresholds, and a custom scorer would duplicate that logic while also being looser than the skill's own zero-dimension auto-fail rule — validating a different, weaker contract than the one actually shipping to production. [Codebase: `AUDIT.md` §1, Risk R4]
+### Do nothing (keep MTTR/RCA/velocity-only)
 
-**Locally re-executing the skill against golden cases (this design's original Phase 1 plan).** Would give a pre-merge regression-testing capability the current design doesn't have. Rejected after a scope audit (`.artifacts/design/OSAC-959/EPIC1-SCOPE-AUDIT.md`): that capability serves only the harness-maintainer/skill-author persona, explicitly excluded from this PRD [Locked: D2]; the local execution stack (isolated workspaces, MCP sandboxing, a second LLM call re-running the skill) is real, ongoing cost and maintenance for a capability nobody asked for in the Feature's DoD. It also measures a proxy (a separately-executed copy of the skill) rather than the DevOps Engineer story's literal ask — "agent success rates" — which this design's chosen approach measures directly, by scoring the bot's real production output. Re-executing locally remains available as a smaller, on-demand follow-on under OSAC-2019 if skill authors request it.
+Rejected — this is the exact gap the PRD's Problem Statement establishes: that narrow lens cannot distinguish a fast-but-unreliable agent from a slow-but-dependable one, or compare bots doing the same job on equal terms.
 
-**A new standalone dashboard instead of extending Org Pulse (and, for Phase 3, UOI).** Rejected: Org Pulse (OSAC-2004) and OSAC-2007 already dashboard adjacent data (EP Review Bot scores, GitLab-sourced `org-pulse-data`), and UOI/Konflux DevLake already dashboards Issue Cycle Time/PR Cycle Time; a new dashboard would duplicate infrastructure and fragment where engineers look for agent-SDLC health across three systems instead of two. [PRD: Dependencies — Org Pulse, UOI] [Locked: D4]
+### New dedicated agent-observability service (OTel-based, Stet-style)
 
-**Remote Harbor/EvalHub execution.** Both runners are mature upstream (verified directly against the pinned checkout, not assumed from documentation) — but this design has no execution step at all to place locally or remotely, so the choice between them is moot here, not merely deferred. OSAC-3010's decision may still matter for other harnesses in this workspace (e.g. `osac-bugfix-eval`'s own execution mode), just not for this design's review-eval harness.
+Considered during design research. Rejected: those tools assume a replayable task corpus and OTel instrumentation the team controls end-to-end. OSAC's three bot systems are architecturally heterogeneous (a Go K8s-Job bot, a Claude-Code-skill pipeline, and a Python eval harness) with no shared trace format, and `[Locked: D1]`/`[Locked: D2]`/`[Locked: D5]` already rule out building new ingestion/API surfaces. Retrofitting a shared OTel schema across all three would be a materially larger cross-repo project than this Feature's scope.
 
-**Switching the judge model instead of calibrating.** Changing `models.judge` to a different family instead of calibrating would remove the same-*model* concern but not establish trust. Rejected as a *substitute* for calibration: a judge's trustworthiness comes from tracking human verdicts on calibration cases (now with an explicit Cohen's κ bar — see OSAC-2267), not from which model it is. Quantified calibration is the mechanism that actually establishes trust; the model choice itself is a separate, secondary decision (see next entry).
+### Push model (bots push metrics to a new endpoint)
 
-**A per-judge model override, split from the `models.judge` default (tried, then dropped).** Briefly restored `qualitative_finding_quality` to `claude-sonnet-4-6` while leaving `models.judge` at `claude-opus-4-6`, on the theory that a different model than the team default is a cheap supplementary hedge against same-model grading. Dropped in favor of one model for both: the split only crosses the *self-preference* line (different model), not the *family-bias* line (both still Anthropic) that 2026 LLM-as-judge bias research treats as a distinct, also-documented risk — so it bought a partial mitigation at the cost of an extra config knob to maintain, with calibration doing the actual trust-establishing work regardless. Unifying to `claude-sonnet-4-6` everywhere removes that knob without giving up anything the split was actually providing.
+Rejected by `[Locked: D1]`. It would also be architecturally inconsistent with the bots being measured — `jira-ai-issue-solver`'s own architecture doc states "Jira and GitHub are the state store... no database" as a design principle `[Research: Architecture Patterns]`; a new push endpoint for metrics would introduce exactly the kind of new state store that system's own design deliberately avoids.
 
-**A cross-provider (non-Anthropic) judge model.** Considered as the only way to achieve genuine family-bias separation — any same-provider choice (Opus, Sonnet, or a mix) doesn't fully address the documented family-bias risk (distinct from self-preference bias). Rejected: the pinned harness's `score.py` hardcodes an Anthropic-only LLM client (`_get_anthropic_client()`) with no multi-provider routing (no LiteLLM/OpenAI path); adding one would mean patching the pinned upstream dependency or building a second non-harness judge-calling path, both of which conflict with this design's core principle of consuming the harness's judge orchestration as-is rather than duplicating or forking it. Left undone; would need to be revisited as a deliberate harness-patching investment, not a config change, if ever pursued.
+### Hardcode bot-role membership per fetcher and per frontend component
+
+Rejected in favor of `bot-roles.yaml`. Hardcoding would require a code change in at least two places (a fetcher and the frontend selector) every time a bot's role assignment changes, or when the currently-empty Implementation-stage role gets its first bot — a config file needs one edit.
+
+### New standalone `org-pulse-core` modules for the two new pages, instead of tabs within the existing AI Impact module
+
+`org-pulse-core`'s module system would support either — every module gets the same auto-mounted `/api/modules/<slug>/data` route regardless. Standalone modules would give cleaner route isolation per page. Rejected in favor of tabs within the existing module because Autofix and EP Review data already live there today, and splitting them into separate modules would duplicate the AI Impact module's existing scaffolding for no requirement-driven benefit — the PRD asks for two dashboard pages, not two platform modules.
+
+### New JSON marker alongside `<!-- AI-BOT-COST -->` for model identity, instead of a new row in the same table
+
+Both are viable for `jira-ai-issue-solver`'s upstream change. A same-table row is recommended here because `parseCostComment()`'s round-trip parsing already proves that table format works reliably; a second marker adds a second thing to keep in sync. This is not this design's call alone, though — see Open Questions.
 
 ## Open Questions
 
-No open questions remain — both questions originally raised here have since been resolved:
+### 1. Same-table row or new marker for `jira-ai-issue-solver` model identity?
 
-**Resolved (was Open Question #1 — cadence and execution environment for the periodic judge-scoring run):** decided as a three-trigger model — change-driven, weekly-scheduled, diagnostic — with an explicit `run_purpose` field and input-fingerprint-based caching. See Implementation Details: **Evaluation cadence**. This also resolves the credential-provisioning hedge in Security Considerations: a CI-scoped credential is now a planned requirement for the scheduled trigger, not an if-pursued follow-on.
+Should model/bot identity be added as a new row inside the existing `<!-- AI-BOT-COST -->` table, or a new sibling marker?
 
-**Resolved (was Open Question #2 — should judge-scoring extend beyond the curated golden set to a rolling sample of real bot comments):** decided as a fourth, bounded trigger type — `run_purpose: rolling_sample` — alongside the three above. A weekly job (same cron as the scheduled trigger) samples a fixed, small N (default 5) of the most recent real `enhancement-proposals` PRs the golden set was never curated from, scores each with `rubric_scoring` (deterministic, no human reference needed) and `qualitative_finding_quality` (quality-only read) — not `critical_findings_recall`, which needs curated `annotations.yaml` findings no real PR has — and renders the result as an explicitly separate, lower-confidence Org Pulse trend line, never blended with the calibrated baseline/scheduled/change_validation line. This is a distinct signal from the scheduled trigger's rotating repeatability sample (which re-scores a few *unchanged golden cases* to catch judge nondeterminism): this one catches drift on PRs the golden set structurally can't see. Bounding the sample size keeps judge-call cost predictable rather than proportional to all real PR volume. See Implementation Details: **Evaluation cadence** (4th trigger) and [OSAC-3259](https://redhat.atlassian.net/browse/OSAC-3259).
+- **Owner:** Maintainers of OSAC's `jira-ai-issue-solver` deployment/fork (the team tracking OSAC-2140).
+- **Impact:** Determines the exact parsing logic `fetch-autofix.py`'s cost-comment parser needs to add.
+
+### 2. Does `agent-eval-harness` already capture per-case review cost?
+
+Does `traces.metrics: true` (already set in both `eval-prd-review.yaml` and `eval-design-review.yaml`) capture per-case dollar cost for review-skill runs the way `run_result.json` does for bugfix runs, or is this a harness-side gap?
+
+- **Owner:** `evals/review/` harness owners (OSAC-2264 team).
+- **Impact:** Determines whether Planning-review's cost-per-review Key Metric is a read of already-captured data or requires new harness-side instrumentation upstream in `agent-eval-harness` itself.
+
+### 3. Is `eranco74/ai-skills`'s review-skill copy the same as this workspace's?
+
+`eranco74/ai-skills` has its own `skills/prd-review`/`skills/design-review` directories, distinct from this workspace's `.claude/skills/prd-review`/`design-review` `[Research: Domain 2]`. Are these kept in sync, an intentional fork, or does OSAC-3168's autonomous pipeline route through a different mechanism (e.g., a GitHub Action) entirely?
+
+- **Owner:** OSAC-3168 owner.
+- **Impact:** Determines whether OSAC-3168's autonomously-generated PRDs/designs are covered by the same Cohen's κ calibration this design surfaces, or need a separate calibration track.
 
 ## Test Plan
 
 ### Unit Tests
 
-- Case validation in `evals/review/lib/` rejects a case missing `reference-review.md` or `annotations.yaml`.
-- `unified-report.schema.yaml` validation rejects an `eval_run` feed record missing a required `feed_type` value. (No `ops-metrics-feed.schema.yaml` exists — see Operational metrics platform.)
+- `fetch-autofix.py`'s new remote-link lookup: returns a PR URL when a matching `enhancement-proposals`-style link exists; returns none when it doesn't (mocked Jira response).
+- `fetch-autofix.py`'s cost/status-comment parser: correctly extracts the total and per-session rows from a real `<!-- AI-BOT-COST -->` table fixture; returns `not_yet_reported` (not an exception) on a comment with a malformed or missing table.
+- `provenance.py`'s new optional flags: a `provenance.json` written without `--cost-usd`/`--duration-seconds`/`--model` still validates against `schema_version` 1 consumers; a log written with them validates against `schema_version` 2.
+- `bot-roles.yaml` loader: an unrecognized bot identity resolves to `unattributed`, not a crash or a silently dropped record.
+- The new unified-report adapter's κ/FPR/FNR computation: given a small synthetic fixture of case verdicts vs. `annotations.yaml` expected verdicts with a hand-calculated expected κ, the adapter's output matches — following the same "commit a fixture from a real run" precedent `evals/lib/bugfix-ingest.md`'s own kickoff checklist already establishes for the bugfix side.
 
 ### Integration Tests
 
-- `evals/review/run-eval.sh` in smoke mode (the current CI smoke check, `evals-review-smoke.yml`) exercises harness setup and case discovery without incurring LLM or GitHub API cost — validates the plumbing without validating scoring accuracy.
-- A full run against the golden dataset in `evals/review/cases/` — fetching each case's real EP Review Bot comment via the GitHub API and scoring it — validates that every applicable judge (`rubric_scoring` for `design-review` cases; `critical_findings_recall` and `qualitative_finding_quality` for both) produces a score, and that thresholds are evaluated correctly against known-good and known-bad fixture cases.
-- Phase 2: the bugfix-eval adapter correctly maps a sample `osac-bugfix-eval` `summary.yaml` into the `eval_run` schema, including a case where the external fork is unreachable (falls back to last-ingested data, per Failure Handling).
-- **Input-fingerprint caching (OSAC-3257):** given two cases with identical `case_id` + bot-comment hash + `rubric_version` + judge model/prompt version + reference/scoring-code version, the scheduled workflow reuses the prior result rather than re-scoring; given a changed fingerprint on any one dimension, it re-scores. A rotating sample of unchanged cases is still re-scored on schedule to monitor judge repeatability.
-- **`run_purpose` classification (OSAC-3257):** a `diagnostic` run is written to raw results but excluded from the aggregate `eval_run` feed Org Pulse ingests; a `baseline`/`scheduled`/successful `change_validation` run is included.
-- **Rolling sample (OSAC-3259):** given a fixture set of N real (non-golden) PRs, the weekly job scores exactly N with `rubric_scoring` + `qualitative_finding_quality` only (no `critical_findings_recall`), tags each `run_purpose: rolling_sample`, and the Org Pulse ingest filter renders those records on a separate trend line from the calibrated baseline/scheduled/change_validation line — never blended into it.
+- Run `evals/review/run-eval.sh --type prd --case _harness-smoke --skip-execute --skip-score` followed by the new adapter, and verify it produces a schema-valid `summary.json` against `evals/lib/unified-report.schema.yaml` — using the existing smoke fixture for wiring validation only, consistent with its documented "not a quality baseline" caveat.
+- New adapter tests follow `evals/review/`'s existing `pytest` conventions (`lib/test_judges.py`-style structure) rather than introducing a new test framework.
 
-### E2E Tests
+### E2E / Manual Verification
 
-- Full baseline run: harness scores all curated PRD and design golden cases and produces a report matching expected pass/fail verdicts for each case, including at least one deliberately-failing case per skill to prove the zero-dimension auto-fail rule is enforced, not just the total-score threshold.
-- Phase 3–4: MTTR/velocity formulas (`measurement-taxonomy.md`) are validated against a known sample of agent-labeled Jira bugs/GitHub PRs, confirming the documented formula matches what UOI's extended Issue Cycle Time/PR Cycle Time tabs actually render for that sample — there is no workspace-native collector to test (see Operational metrics platform); this proves the formula documentation is correct against the live UOI output.
+No e2e framework exists for `org-pulse-data` or the Org Pulse frontend in this workspace. Manual verification checklist before considering a role "live":
 
-CI scope for all of the above remains unit tests plus the wiring-only smoke check (`evals-review-smoke.yml`) until the CI-scoped LLM credential decided in Evaluation cadence (Implementation Details) is provisioned; full judge-scoring runs stay human-triggered until then. This is independent of OSAC-3010, which no longer governs this design's execution mode (see Motivation).
+- Run each extended fetcher against real (non-mocked) Jira/GitHub data on a scratch branch; confirm output JSON matches the Bot Metric Record shape, including `state` fields.
+- Visually confirm both new dashboard pages render KPI tiles/trend/distribution correctly for at least the two bots the PRD's cross-role validation requires (In Scope).
+- Confirm the Bot/Model selector correctly scopes to its role group and excludes bots from other roles.
+- Confirm missing-data states render distinctly, before any bot in a role has real data (this is directly testable today for the Implementation-stage role, which has zero bots).
 
 ## Graduation Criteria
 
-This is workspace-internal tooling, not a component targeting an OpenShift release train, so `alpha`/`beta`/`GA` maturity levels don't apply. The four delivery phases already defined (Phase 1: eval harness; Phase 2: unified bugfix-eval reporting; Phase 3: operational metrics; Phase 4: Org Pulse trends + weekly reports) are the graduation stages. A phase is complete when its Definition-of-Done items (tracked per-Epic in Jira under OSAC-959) are met and, for Phase 1–2, the eval harness golden dataset and baseline report exist and are reproducible.
+Sequenced by the asymmetric instrumentation state found during design research, not a generic maturity ladder:
+
+- **Dev Preview:** Bug Fix Flow role only — cost and reliability already flow from `jira-ai-issue-solver`'s existing comments; identity still `unattributed`. Both dashboard pages exist; Feature Development Flow's three sub-sections show "building baseline."
+- **Tech Preview:** All four role groups emit real (non-`not_yet_reported`) data for at least one bot each, satisfying the PRD's In Scope cross-role validation requirement (≥2 bots spanning ≥1 planning-generation, ≥1 planning-review, ≥1 code-stage bot).
+- **GA:** Sustained multi-week trend data across at least two bots per populated role group, and bot/model identity attributed (not `unattributed`) for the majority of records in each role.
 
 ## Upgrade / Downgrade Strategy
 
-Not applicable. There is no running service, CRD, or persistent cluster state introduced by this design — `evals/review/` is a set of files invoked on demand, and the Org Pulse extension adds fields to an existing pipeline rather than introducing a new one. "Downgrading" is deleting the added files and feed fields; nothing depends on them existing for correctness of any other OSAC component.
+Every schema change in this design is additive: `provenance.json`'s `schema_version` bump to 2 only adds optional fields, and old logs without them remain valid inputs to `detect_provenance()`'s generic parse. `evals/lib/unified-report.schema.yaml`'s new `workflow_aggregate` fields are optional additions to an existing, not-yet-widely-consumed schema. Downgrading any component simply means it stops reading the new fields — no data migration, and no other component's behavior depends on their presence. There is no CRD version and no `fulfillment-service`/`osac-operator` coupling for this Feature to skew against.
 
 ## Version Skew Strategy
 
-Largely not applicable — there is no multi-component cluster rollout to skew. The one real version-coupling concern is between the pinned harness version (`evals/review/harness.lock` → `v1.22.0`, used for `score.py` only), the skill files the EP Review Bot invokes and whose output this harness scores (`skills/prd-review`, `skills/design-review`), and the golden dataset's `rubric_version` annotation: if the skill's rubric changes without a corresponding case/annotation update, the harness will score against a stale expectation. This is mitigated by versioning the rubric alongside the dataset (`rubric_version` in case annotations) rather than by any runtime skew-handling logic.
+The real skew concern here is not fulfillment-service/osac-operator version pairing — it's fetcher code version against externally-versioned bot output. `fetch-autofix.py`'s cost/status-comment parser is written against `jira-ai-issue-solver`'s current comment format, a repo this design does not own and whose release cadence is not coordinated with `org-pulse-data`'s. If that format changes independently, the parser degrades to `not_yet_reported` rather than failing (see Failure Handling) — the mitigation for this skew is defensive parsing, not synchronized releases, since no release coordination mechanism exists between the two repos today.
 
 ## Support Procedures
 
-**Detecting failure:** a failed harness run exits non-zero and leaves no new report in `evals/review/results/`; the previous baseline remains visible for comparison. There is no PR-blocking check to fail under this design — see Non-Goals.
+**Symptom: a bot's dashboard section is stuck on "not yet reported" longer than expected.**
+1. Manually confirm the expected comment/marker actually exists on a recent PR or committed doc for that bot (`gh api` against the relevant repo).
+2. Check the corresponding fetcher's GitLab CI job stdout log for parse warnings (the existing `print()`-based pattern, extended per Observability above).
+3. If the upstream format changed, this is the cross-repo dependency risk materializing (see Risks) — escalate to that bot's owning workstream, not to `org-pulse-data`'s pipeline owners.
 
-**Disabling:** the harness is not, and cannot become, a blocking gate under this design (`evals-review-smoke.yml` is `workflow_dispatch`-only and skips the judge call entirely), so there is nothing to disable in an emergency — the review pipeline (bot on PRs) is unaffected either way, and there is no local skill execution to disable since none exists.
-
-**Recovery:** re-enabling the gate (or fixing a broken harness run) requires no data migration or consistency repair — evals are stateless, read-only document exercises with no mutable external state to reconcile.
+**Disabling a single role's data:** Each fetcher extension is independently additive and backward compatible — reverting one fetcher's new fields (or removing a role from `bot-roles.yaml`) has no effect on the other three roles or on the underlying Jira/GitHub read access the other fetchers depend on.
 
 ## Infrastructure Needed
 
-**None.** This design reuses `osac-workspace`'s existing repo, existing GitHub Actions CI (`evals-review-smoke.yml`, `workflow_dispatch`-only), the existing GitHub API (a read-only fetch of already-posted bot comments), the existing Org Pulse / `org-pulse-data` pipeline (Phase 1–2, 4), and UOI/Konflux DevLake's existing Issue Cycle Time/PR Cycle Time tabs (Phase 3, per Operational metrics platform). No new subproject, repository, cluster namespace, or testing infrastructure is requested for any phase.
-
-Unlike an earlier iteration of this design, this holds regardless of OSAC-3010's outcome: that decision governs local-vs-remote *execution* infrastructure (Harbor's cluster namespace/RBAC/container image, or EvalHub's operator deployment/provider registration — both real, mature upstream per the harness's deploy docs), and this design has no execution step to place anywhere, locally or remotely (see Motivation, Non-Goals, Alternatives). OSAC-3010 may still matter for other harnesses in this workspace — `osac-bugfix-eval`'s own execution mode, for instance — just not for this review-eval harness.
-
-The one piece of infrastructure this design now commits to (previously left open) is a CI-scoped `AnthropicVertex` credential for the scheduled/change-driven triggers, provisioned on `osac-workspace` following the same pattern `ep-review.yml` already uses in `enhancement-proposals` — tracked on [OSAC-3257](https://redhat.atlassian.net/browse/OSAC-3257). See Implementation Details (Evaluation cadence) and Security Considerations (credential provisioning).
+None. Every component runs on existing GitLab CI runners (`org-pulse-data`), the existing sidecar, and the existing Org Pulse deployment `[Locked: D1]`/`[Locked: D4]`/`[Locked: D5]`. No new repository is created — this design extends `edge-infrastructure/org-pulse-data`, `.ai-workflows/_shared/scripts/provenance.py`, and `evals/lib`/`evals/review`, all of which already exist.
 
 ---
 
 ## Provenance
 
-Authored: revise @ design 0.4.0 - 7b6dfe0, workspace OSAC-2264-review-harness-judges @ 6f530dcb
-Phases: revise, revise, draft, revise
+Authored: draft @ design 0.5.0 - 68284c8, workspace main @ 07cf78f3
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"design","workflow_version":"0.4.0","ai_workflows":"7b6dfe0","source_repo":"6f530dcb","source_repo_branch":"OSAC-2264-review-harness-judges","commits_behind_main":0,"commits_ahead_main":6,"main_ref":"main","phases":["revise","revise","draft","revise"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"design","workflow_version":"0.5.0","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft"],"authoring_modes":["skill"],"context_changed":false} -->
