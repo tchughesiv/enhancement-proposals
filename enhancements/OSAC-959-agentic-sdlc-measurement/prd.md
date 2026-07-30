@@ -1,66 +1,88 @@
-# Agentic SDLC Measurement
+# Agentic SDLC Evaluation Framework
 
 | Field       | Value   |
 |-------------|---------|
 | Author(s)   | Tommy Hughes |
-| Jira        | [OSAC-959](https://redhat.atlassian.net/browse/OSAC-959) |
-| Date        | 2026-07-23 |
-
-*Scope note: this is an internal engineering-tooling PRD — it has no tenant-facing surface, and none of OSAC's four canonical personas or tenant-facing cross-cutting dimensions apply (see User Stories).*
+| Jira        | https://redhat.atlassian.net/browse/OSAC-959 |
+| Date        | 2026-07-30 |
 
 ## Problem Statement
 
-The team is transitioning bug-fix and feature-development workflows to an agentic (AI-agent-driven) SDLC, but has no quantitative way to know whether that transition is actually working. Today's only measurement is an FTPR (first-time-pass-rate) dashboard (`n8n-pulumi-poc`, an existing internal automation pipeline) that predates the agentic effort and wasn't designed to isolate agent-driven work from human-driven work. Without dedicated metrics for MTTR, RCA accuracy, and development velocity, engineering leadership, product owners, and DevOps engineers cannot tell whether AI agents are improving outcomes, holding steady, or introducing risk. Any automated scoring built to answer that question is itself unproven until it addresses a specific trust gap: nothing today prevents an LLM-as-judge from favoring output written in its own model family's style over output that is actually better. [Jira: OSAC-959] [Clarify: R2.Q1]
+OSAC is shifting bug-fix and feature-development work onto AI agents — a Bug Fix Flow and a Feature Development Flow — but has no quantitative way to evaluate agent performance beyond MTTR, RCA accuracy, and velocity. That narrow lens can't distinguish a fast-but-unreliable agent from a slow-but-dependable one, or a cheap agent from a genuinely cost-effective one: a cheap-but-unreliable bot costs more per outcome than an expensive, reliable one once failed attempts are counted, but a cost-per-token or cost-per-run view hides this entirely. More than one bot/model is already in production — the EP Review Bot for planning review, the OSAC-516 bugfix-eval harness for Bug Fix Flow, with `prd-creator`/`design-creator` from OSAC-3168 and future alternatives on the way — and today there is no way to compare them on equal terms. Without a consistent, bot-agnostic framework, the team cannot tell whether AI agents are actually improving outcomes, cannot identify what is holding a given agent back, and cannot make an informed build-vs-buy-vs-swap call when a new bot or model becomes available.
 
 ## In Scope
 
-- A documented measurement framework defining MTTR, RCA accuracy (indirect, via review-finding recall and bug-fix correctness scoring), and development velocity for agentic bug-fix and feature-development workflows. [Jira: OSAC-959]
-- Automated data collection from Jira and GitHub feeding that framework. [Jira: OSAC-959]
-- A judge-model policy: any automated agent-performance score is only trusted once it has been shown to agree with a human reviewer's judgment on real, human-reviewed reference cases. A score that hasn't been checked this way is treated as unproven, not authoritative. [Clarify: R2.Q1]
-- Extension of the existing Org Pulse dashboard with new tabs/data surfacing agent-performance eval trends — not a new, standalone dashboard. [Clarify: R1.Q4] **(Revised 2026-07-28):** MTTR and velocity operational metrics are delivered as an agent-attribution extension to UOI's (Konflux DevLake) existing Issue Cycle Time/PR Cycle Time tabs instead — a second pre-existing dashboard, not a new one — per Eran Cohen's direction on [OSAC-2261](https://redhat.atlassian.net/browse/OSAC-2261). The weekly reporting pipeline below links both surfaces from one place; see Dependencies.
-- A dedicated weekly automated reporting pipeline, sourced from this framework's own data feeds, distinct from existing personal-activity reporting tooling. [Clarify: R1.Q5]
-- Validation of the framework against real end-to-end use cases, delivered in phases (see Assumptions for the specific sequencing). [Jira: OSAC-959]
-- Per-run cost telemetry for eval/CI-review runs (what an automated review or eval invocation costs) as a distinct observability signal, separate from AI-usage billing. [Clarify: R1.Q3]
+- A five-dimension evaluation framework — Effectiveness, Efficiency, Autonomy, Reliability, and Continuous Improvement — applied consistently across the Bug Fix Flow and both stages of the Feature Development Flow (Planning, covering both generation and review, and Implementation).
+- Bot/model identity (name, version, underlying model) as a first-class attribute of every metric, so the same dashboards can later be pointed at a different bot, model, or vendor without redefining the metrics.
+- Cost measured per successfully-completed outcome (model spend, runtime spend, retry/rework cost, and human review time combined) for every bot role — not per token or per run.
+- An agent-segmented first-time CI pass rate and a CI-failure-type breakdown (unit test / lint / build / integration) for bot-authored pull requests, shown alongside — not replacing — the organization's existing whole-org pass-rate view.
+- Two new Org Pulse "AI Impact" dashboard pages — Bug Fix Flow Evaluation and Feature Development Flow Evaluation — using OSAC's existing AI Impact template: KPI tiles, a rolling 8-week trend chart, and a paired score-distribution/dimension-breakdown chart. `[Clarify: R2.Q2]`
+- A Bot/Model selector on each dashboard page, scoped to bots performing the same role, so comparisons only ever happen between bots doing the same job:
+
+```mermaid
+flowchart LR
+    P1[Bug Fix Flow Evaluation page] --> R1["Bug Fix Flow bots<br/>(own Bot/Model selector)"]
+    P2[Feature Development Flow Evaluation page] --> R2["Planning: generation bots<br/>(own Bot/Model selector)"]
+    P2 --> R3["Planning: review bots<br/>(own Bot/Model selector)"]
+    P2 --> R4["Implementation-stage bots<br/>(own Bot/Model selector)"]
+```
+
+- Dashboard metrics refresh automatically on OSAC's existing recurring data-collection schedule (well under an hour); no manual data pulls and no real-time/live-update requirement. `[Clarify: R1.Q5]`
+- Explicit "not yet reported," "building baseline," or "unattributed" states wherever cost, reliability, or bot-identity data is missing or insufficient — never a blank or a zero — with affected bots excluded from bot/model comparisons until real data exists. `[Clarify: R1.Q3]`
+- Validation of the framework against real end-to-end use cases from the team's backlog, run against at least two bots/models spanning at least one planning-stage generation bot, one planning-stage review bot, and one code-stage bot, to confirm the framework generalizes across roles and vendors rather than being tuned to a single bot.
 
 ## Out of Scope
 
-- Code quality metrics (test coverage, cyclomatic complexity, etc.). [Jira: OSAC-959]
-- Tenant User productivity tracking. [Jira: OSAC-959]
-- Cost analysis of production/tenant AI model usage (e.g., per-tenant AI usage billing). [Clarify: R1.Q3]
+- Code quality metrics such as test coverage or cyclomatic complexity.
+- Tenant user productivity tracking.
+- Per-tenant/production AI-usage billing — distinct from the operational bot/model cost tracked above.
+- Detailed dashboard UI/visual design (exact tile layout, chart library) beyond the KPI-tile/trend/distribution template already in use.
+- Defining or maintaining UOI/Konflux DevLake's whole-org Issue Cycle Time, PR Cycle Time, and first-time-pass-rate metrics — these already exist independently. MTTR and PR velocity remain on their existing UOI view; the new Org Pulse pages link to that view rather than duplicating or moving it. `[Clarify: R2.Q1]`
+- API or CLI access to these metrics — dashboard consumption only for this Feature. `[Clarify: R1.Q2]`
+- New data retention or archival infrastructure — the 8-week trend window is a display constraint, not a change to how long underlying data is kept. `[Clarify: R2.Q2]`
+- Automated report distribution (e.g., a scheduled email or Slack digest) — the dashboards' own trend charts already cover the recurring-pulse need.
+- Predictive insights, optimization recommendations, or closed-loop automatic tuning of prompts, models, or workflows based on evaluation results — this Feature reports and displays data; it does not act on it automatically.
+- Dashboard user documentation (e.g., a short guide explaining the five dimensions and the "not yet reported"/"building baseline"/"unattributed" states) — addressed in the design EP, not this Feature's scope decision.
 
 ## User Stories
 
-These personas are internal engineering roles who consume agentic-SDLC measurement output — not OSAC's tenant-facing personas (Cloud Provider Admin, Cloud Infrastructure Admin, Tenant Admin, Tenant User). This feature has no tenant-observable behavior and none of OSAC's tenant-facing cross-cutting dimensions (Tenant Onboarding, Networking, Storage, Provisioning, Inventory, UI-in-osac-ui) apply. [Clarify: R1.Q1]
-
 ### Lead Engineer
 
-- As a lead engineer, I want to see MTTR trend data for agent-driven bug fixes so that I can tell whether AI agents are resolving issues faster over time. [Jira: OSAC-959]
+- As a lead engineer, I need metrics showing MTTR improvement from AI agents.
+- As a lead engineer, I want to know what a bot/agent costs per resolved bug or accepted feature, so I can judge whether its speed is actually worth the spend.
+- As a lead engineer, I want to see how often an agent needs human intervention or a retry to succeed, so I can judge how close it is to running unsupervised.
+- As a lead engineer, I want to know how well the review bot's verdict matches a human reviewer's judgment, so I can trust its pass/fail calls without re-checking every one.
+- As a lead engineer, I want to see an explicit "not yet reported" or "building baseline" indicator when a bot's cost or reliability data isn't available yet, so I don't mistake missing data for a bot being free or already proven reliable. `[Clarify: R1.Q3]`
 
 ### Product Owner
 
-- As a product owner, I want to see cycle-time data — from Jira Task creation to merged PR — for agent-assisted feature work, so that I can plan releases with a realistic sense of agent-assisted throughput. [Jira: OSAC-959]
+- As a product owner, I need data on feature development velocity with agents.
+- As a product owner, I want to know how consistently an agent succeeds across repeated attempts — not just its average speed — so a flaky agent doesn't quietly inflate my delivery estimates.
+- As a product owner, I want to know whether an autonomously generated PRD/design needs fewer revision cycles than our current process, so I can judge whether adopting `prd-creator`/`design-creator` would actually speed up delivery.
+- As a product owner, I want the new dashboards to link to our existing MTTR and velocity view rather than duplicating it, so I have one authoritative place to check those numbers regardless of which dashboard I started from. `[Clarify: R2.Q1]`
 
 ### DevOps Engineer
 
-- As a DevOps engineer, I want a dashboard tracking agent success rates over time so that I can monitor the health of the agentic SDLC without manually cross-referencing Jira and GitHub. [Jira: OSAC-959]
+- As a DevOps engineer, I need an Org Pulse dashboard tracking agent success rates over time, using the same AI Impact template already in use elsewhere.
+- As a DevOps engineer, I want to switch the same dashboard's Bot/Model dropdown to compare two different bots, the same way I'd change the time range, so evaluating a candidate replacement doesn't require a new dashboard.
+- As a DevOps engineer, I want to see whether execution traces and human-override signals are being captured completely, so I know the data needed to actually improve the agents over time isn't silently missing.
+- As a DevOps engineer, I want a bot/model's data to still show up under an "unattributed" grouping if its identity hasn't been wired up yet, so a gap in one bot's setup doesn't hide or block the rest of the dashboard. `[Clarify: R2.Q3]`
 
 ## Assumptions
 
-- No numeric target thresholds exist yet for MTTR improvement, RCA accuracy, or velocity change — the framework establishes baselines first; specific targets are not yet defined. [Clarify: Remaining Gaps]
-- End-to-end validation against real use cases proceeds in phases rather than all at once: an initial planning-review golden set, followed later by real bug-fix outcome validation once bug-fix evaluation is integrated — full validation is not available from day one. [Jira: OSAC-959]
+- This Feature has no tenant-facing surface — all consumers are internal OSAC engineering roles (Lead Engineer, Product Owner, DevOps Engineer), not the four canonical tenant/provider personas used elsewhere in OSAC PRDs.
+- `agent-eval-harness` continues to run its existing judge/human calibration (Cohen's κ) for the EP Review Bot; this Feature surfaces that calibration data rather than building a new one.
+- The two new Org Pulse "AI Impact" pages are added within OSAC's own existing Org Pulse deployment, which OSAC's team already controls — no coordination with another team's Org Pulse instance is required. `[Clarify: R1.Q4]`
+- No numeric target thresholds (e.g., MTTR reduction %, RCA accuracy %) are set at launch for any dimension — success criteria establish a baseline first, consistent with today's small reference sample sizes (an 11-case bugfix backtest set; a 10-PRD/6-design gold-standard set).
 
 ## Dependencies
 
-- **Org Pulse dashboard (OSAC-2004):** Provides the dashboard surface this framework's eval-trend data extends; must not duplicate EP Review Bot score visibility already dashboarded there (OSAC-2007). [Clarify: R1.Q4]
-- **UOI / Konflux DevLake dashboard:** Provides the Issue Cycle Time and PR Cycle Time tabs this framework's MTTR/velocity formulas extend with an agent-attribution dimension, rather than a new fetcher or feed — added 2026-07-28 per Eran Cohen's direction on [OSAC-2261](https://redhat.atlassian.net/browse/OSAC-2261); pipeline ownership and segmentation feasibility are coordinated via OSAC-2518.
-- **Bug-fix evaluation harness (OSAC-516 / `eranco74/osac-bugfix-eval`):** Supplies the RCA-accuracy and bug-fix-outcome data this framework ingests rather than re-implementing; currently lives on a personal fork with no organizational backup. [Jira: OSAC-959]
-- **Alignment sign-off (Eran Cohen):** Two program-level questions — comfortable with phased E2E validation and indirect RCA accuracy for this milestone, and whether Epic 3–4 priorities should shift — remain unanswered as of this PRD. [Clarify: R1.Q6]
+- **Each bot's owning workstream:** Bug Fix Flow's OSAC-516 harness, OSAC-3168's `prd-creator`/`design-creator`, and the EP Review Bot must each emit cost, model/bot identity, and — for the review role — judge/human agreement data before that bot's dashboard metrics can populate. Until a given workstream starts emitting, its dashboard section shows the "building baseline"/"not yet reported" state.
 
 ---
 
 ## Provenance
 
-Authored: revise @ prd 0.6.0 - 7b6dfe0, workspace OSAC-2264-review-harness-judges @ 6f530dcb
-Phases: draft, revise, revise
+Authored: draft @ prd 0.6.3 - 68284c8, workspace main @ 07cf78f3
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.0","ai_workflows":"7b6dfe0","source_repo":"6f530dcb","source_repo_branch":"OSAC-2264-review-harness-judges","commits_behind_main":0,"commits_ahead_main":6,"main_ref":"main","phases":["draft","revise","revise"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.3","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft"],"authoring_modes":["skill"],"context_changed":false} -->
