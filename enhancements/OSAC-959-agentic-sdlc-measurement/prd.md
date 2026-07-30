@@ -8,7 +8,7 @@
 
 ## Problem Statement
 
-OSAC is shifting bug-fix and feature-development work onto AI agents — a Bug Fix Flow and a Feature Development Flow — but has no quantitative way to evaluate agent performance beyond MTTR, RCA accuracy, and velocity. That narrow lens can't distinguish a fast-but-unreliable agent from a slow-but-dependable one, or a cheap agent from a genuinely cost-effective one: a cheap-but-unreliable bot costs more per outcome than an expensive, reliable one once failed attempts are counted, but a cost-per-token or cost-per-run view hides this entirely. More than one bot/model is already in production — the EP Review Bot for planning review, the OSAC-516 bugfix-eval harness for Bug Fix Flow, with `prd-creator`/`design-creator` from OSAC-3168 and future alternatives on the way — and today there is no way to compare them on equal terms. Without a consistent, bot-agnostic framework, the team cannot tell whether AI agents are actually improving outcomes, cannot identify what is holding a given agent back, and cannot make an informed build-vs-buy-vs-swap call when a new bot or model becomes available.
+OSAC is shifting bug-fix and feature-development work onto AI agents — a Bug Fix Flow and a Feature Development Flow — but has no quantitative way to evaluate agent performance beyond MTTR, RCA accuracy, and velocity. That narrow lens can't distinguish a fast-but-unreliable agent from a slow-but-dependable one, or a cheap agent from a genuinely cost-effective one: a cheap-but-unreliable bot costs more per outcome than an expensive, reliable one once failed attempts are counted, but a cost-per-token or cost-per-run view hides this entirely. More than one bot/model is already in production — the EP Review Bot for planning review, the `jira-ai-issue-solver`-based bot for Bug Fix Flow, with `prd-creator`/`design-creator` from OSAC-3168 and future alternatives on the way — and today there is no way to compare them on equal terms. Without a consistent, bot-agnostic framework, the team cannot tell whether AI agents are actually improving outcomes, cannot identify what is holding a given agent back, and cannot make an informed build-vs-buy-vs-swap call when a new bot or model becomes available.
 
 ## In Scope
 
@@ -78,13 +78,13 @@ flowchart LR
 
 ## Dependencies
 
-- **Each bot's owning workstream:** Bug Fix Flow's OSAC-516 harness, OSAC-3168's `prd-creator`/`design-creator`, and the EP Review Bot must each emit cost, model/bot identity, and — for the review role — judge/human agreement data before that bot's dashboard metrics can populate. Until a given workstream starts emitting, its dashboard section shows the "building baseline"/"not yet reported" state.
+- **Each bot's owning workstream:** Bug Fix Flow's `jira-ai-issue-solver` deployment, OSAC-3168's `prd-creator`/`design-creator`, and the EP Review Bot must each emit cost, model/bot identity, and — for the review role — judge/human agreement data before that bot's dashboard metrics can populate. (OSAC-516's `osac-bugfix-eval` backtesting harness is a separate dependency — it scores fix quality against a curated historical case set and is relevant to Reliability/fix-correctness validation, not to this cost/identity data.) Until a given workstream starts emitting, its dashboard section shows the "building baseline"/"not yet reported" state.
 
 ---
 
 ## Provenance
 
 Authored: revise @ prd 0.6.3 - 68284c8, workspace main @ 07cf78f3
-Phases: draft, revise
+Phases: draft, revise, revise
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.3","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft","revise"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.3","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft","revise","revise"],"authoring_modes":["skill"],"context_changed":false} -->
