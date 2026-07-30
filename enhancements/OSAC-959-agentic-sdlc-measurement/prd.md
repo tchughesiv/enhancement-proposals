@@ -36,13 +36,13 @@ flowchart LR
 - Code quality metrics such as test coverage or cyclomatic complexity.
 - Tenant user productivity tracking.
 - Per-tenant/production AI-usage billing — distinct from the operational bot/model cost tracked above.
-- Detailed dashboard UI/visual design (exact tile layout, chart library) beyond the KPI-tile/trend/distribution template already in use.
+- Detailed dashboard UI/visual design (exact colors, spacing, chart library, and whether existing AI Impact template components are reused as-is or extended) — this Feature specifies the required states and interactions (KPI/trend/distribution-style presentation, Bot/Model selector, missing-data states); the design EP determines the concrete implementation.
 - Defining or maintaining UOI/Konflux DevLake's whole-org Issue Cycle Time, PR Cycle Time, and first-time-pass-rate metrics — these already exist independently. MTTR and PR velocity remain on their existing UOI view; the new Org Pulse pages link to that view rather than duplicating or moving it. `[Clarify: R2.Q1]`
-- API or CLI access to these metrics — dashboard consumption only for this Feature. `[Clarify: R1.Q2]`
+- A dedicated CLI tool for these metrics, or a documented/externally-supported API contract beyond what the underlying platform already provides incidentally — dashboard consumption is this Feature's committed interface (see Assumptions). `[Clarify: R1.Q2 — amended]`
 - New data retention or archival infrastructure — the 8-week trend window is a display constraint, not a change to how long underlying data is kept. `[Clarify: R2.Q2]`
 - Automated report distribution (e.g., a scheduled email or Slack digest) — the dashboards' own trend charts already cover the recurring-pulse need.
 - Predictive insights, optimization recommendations, or closed-loop automatic tuning of prompts, models, or workflows based on evaluation results — this Feature reports and displays data; it does not act on it automatically.
-- Dashboard user documentation (e.g., a short guide explaining the five dimensions and the "not yet reported"/"building baseline"/"unattributed" states) — addressed in the design EP, not this Feature's scope decision.
+- The detailed content and delivery plan for dashboard user documentation (e.g., a short guide explaining the five dimensions and the "not yet reported"/"building baseline"/"unattributed" states) — a documentation need is identified here; the design EP plans and delivers it.
 
 ## User Stories
 
@@ -73,6 +73,7 @@ flowchart LR
 - This Feature has no tenant-facing surface — all consumers are internal OSAC engineering roles (Lead Engineer, Product Owner, DevOps Engineer), not the four canonical tenant/provider personas used elsewhere in OSAC PRDs.
 - `agent-eval-harness` continues to run its existing judge/human calibration (Cohen's κ) for the EP Review Bot; this Feature surfaces that calibration data rather than building a new one.
 - The two new Org Pulse "AI Impact" pages are added within OSAC's own existing Org Pulse deployment, which OSAC's team already controls — no coordination with another team's Org Pulse instance is required. `[Clarify: R1.Q4]`
+- Because the new pages are built the same way as OSAC's existing Org Pulse AI Impact tabs, their underlying metric data is already incidentally reachable via that platform's standard per-module API mechanism — this Feature does not need to build new API access for that to be true, though it is not a documented or supported external contract. `[Clarify: R1.Q2 — amended]`
 - No numeric target thresholds (e.g., MTTR reduction %, RCA accuracy %) are set at launch for any dimension — success criteria establish a baseline first, consistent with today's small reference sample sizes (an 11-case bugfix backtest set; a 10-PRD/6-design gold-standard set).
 
 ## Dependencies
@@ -83,6 +84,7 @@ flowchart LR
 
 ## Provenance
 
-Authored: draft @ prd 0.6.3 - 68284c8, workspace main @ 07cf78f3
+Authored: revise @ prd 0.6.3 - 68284c8, workspace main @ 07cf78f3
+Phases: draft, revise
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.3","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.6.3","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft","revise"],"authoring_modes":["skill"],"context_changed":false} -->
