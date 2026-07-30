@@ -24,11 +24,13 @@ This design extends OSAC's existing Org Pulse data pipeline (`edge-infrastructur
 
 ## Motivation
 
-OSAC already runs three architecturally unrelated bot systems in production: `jira-ai-issue-solver` (a Go binary running in Kubernetes Jobs, state held in Jira/GitHub, no database), `eranco74/ai-skills` (a Claude-Code-skill pipeline that self-publishes via git), and `agent-eval-harness` (a Python scoring harness invoked via a script chain). Each already externalizes some of what this Feature needs — `jira-ai-issue-solver` posts structured `<!-- AI-BOT-COST -->` and `[AI-BOT-STATUS]` PR comments today; the workspace's own `ai-workflows` `provenance.py` library, which `ai-skills` also calls, already embeds a machine-readable marker in every PRD/design doc it publishes; `evals/lib/unified-report.schema.yaml` already reserves a `feed_type: eval_run` discriminator explicitly for Org Pulse ingestion. None of the three emits everything this Feature needs, and no existing system aggregates the three into role-comparable metrics.
+OSAC runs two production bot/harness systems relevant to this Feature: `jira-ai-issue-solver` (a Go binary running in Kubernetes Jobs, state held in Jira/GitHub, no database) for Bug Fix Flow, and `agent-eval-harness` (a Python scoring harness invoked via a script chain) for Planning-review calibration. Each already externalizes some of what this Feature needs — `jira-ai-issue-solver` posts structured `<!-- AI-BOT-COST -->` and `[AI-BOT-STATUS]` PR comments today; `evals/lib/unified-report.schema.yaml` already reserves a `feed_type: eval_run` discriminator explicitly for Org Pulse ingestion. Neither emits everything this Feature needs, and no existing system aggregates them into role-comparable metrics.
 
-The implementation challenge is therefore not building new instrumentation infrastructure — `org-pulse-data`'s existing scheduled-fetch/sidecar-poll pipeline already does that job for two other OSAC dashboards — but bridging three heterogeneous, already-live emission mechanisms into one comparable data model without introducing a fourth. Direct inspection of the live pipeline during design research confirmed the per-role starting points are asymmetric: Bug Fix Flow already emits cost and retry data externally (only bot identity is missing); Planning-generation emits neither cost nor duration anywhere yet; Planning-review's calibration mechanics (harness judges, golden-set cases) are themselves still unconfigured (`judges: TBD` in both eval YAMLs; `cases/{prd,design}/` are empty placeholders). This design treats that asymmetry explicitly rather than proposing one uniform "add a field" plan across all three.
+No production Planning-generation bot exists today. OSAC-3168 (`prd-creator`/`design-creator`) is a real, tracked Jira epic, but its current implementation, `eranco74/ai-skills`, is a personal proof-of-concept/research repo — not a deployed OSAC system. This design does not treat it as something to extend or as a dependency to sequence against. It is useful only as directional evidence that the shared `ai-workflows` `provenance.py` marker mechanism this design already extends for `[Locked: D1]` is a viable integration point for this role too, since the PoC already calls that same shared script for its own publish step. Whatever bot eventually becomes OSAC's production Planning-generation system is the one this design's plumbing is built ahead of, not `eranco74/ai-skills` specifically.
 
-A live `jira` CLI query run during this design (2026-07-30) also found zero Jira Task-type issues carrying a bot-processing label or bot assignee — the PRD's fourth role group, Implementation-stage, has no confirmed bot in production today. This design still builds that role group's plumbing (Non-Goals does not exclude it), so it is ready the moment a bot starts processing Tasks, but its dashboard section starts in the "building baseline" state with zero attributed bots, which is a correct outcome under `[Locked: D3]`, not a gap in this design.
+The implementation challenge is therefore not building new instrumentation infrastructure — `org-pulse-data`'s existing scheduled-fetch/sidecar-poll pipeline already does that job for two other OSAC dashboards — but bridging heterogeneous, already-live emission mechanisms into one comparable data model without introducing a new one, while also building ahead of need for the two roles that have no production bot at all. Direct inspection of the live pipeline during design research confirmed the per-role starting points are asymmetric: Bug Fix Flow already emits cost and retry data externally (only bot identity is missing); Planning-generation has no production bot to emit anything (see above); Planning-review's calibration mechanics (harness judges, golden-set cases) are themselves still unconfigured (`judges: TBD` in both eval YAMLs; `cases/{prd,design}/` are empty placeholders). This design treats that asymmetry explicitly rather than proposing one uniform "add a field" plan across roles that are, in reality, at very different starting points.
+
+A live `jira` CLI query run during this design (2026-07-30) also found zero Jira Task-type issues carrying a bot-processing label or bot assignee — the PRD's fourth role group, Implementation-stage, has no confirmed bot in production today either. This design still builds that role group's plumbing (Non-Goals does not exclude it), so it is ready the moment a bot starts processing Tasks, but its dashboard section starts in the "building baseline" state with zero attributed bots, which is a correct outcome under `[Locked: D3]`, not a gap in this design. Planning-generation is in the same position for a different reason (see above) — two of this design's four role groups start with zero attributed production bots, which `[Locked: D3]`'s explicit-state design was built to handle from day one, not as an afterthought.
 
 ### Goals
 
@@ -40,15 +42,15 @@ A live `jira` CLI query run during this design (2026-07-30) also found zero Jira
 
 ### Non-Goals
 
-- Rebuilding, forking, or modifying the internal logic of `jira-ai-issue-solver`, `eranco74/ai-skills`, or `agent-eval-harness` — this design specifies what each must additionally emit and where `org-pulse-data` reads it, not how those systems otherwise work.
-- Populating the golden-set eval cases (10 PRD / 6 design) or configuring harness judges/thresholds — that is OSAC-2264/OSAC-2267 scope. This design specifies the data contract those efforts must emit into so Planning-review's Key Metrics have somewhere to land once they exist.
+- Rebuilding, forking, or modifying the internal logic of `jira-ai-issue-solver` or `agent-eval-harness` — this design specifies what each must additionally emit and where `org-pulse-data` reads it, not how those systems otherwise work. (No production Planning-generation bot exists to make an equivalent commitment about — see Motivation.)
+- Populating the golden-set eval cases (10 PRD / 6 design) or configuring harness judges/thresholds — that is scope for the harness-judges/case-schema-definition and baseline-eval-run work tracked separately from this design (not cited by Jira number here, since the existing OSAC-959 Jira tree is expected to be replaced once this design is decomposed — see Open Questions). This design specifies the data contract those efforts must emit into so Planning-review's Key Metrics have somewhere to land once they exist.
 - Real-time or webhook-driven updates — inherits the existing ~30-minute fetch cadence and ~5-minute sidecar-poll cadence as-is. `[Locked: D5]`
 - A new database or persistent store beyond `org-pulse-data`'s existing JSON-committed-to-git pattern.
 - Inventory, Provisioning, Networking, and Storage backend changes — not applicable; this Feature has no infrastructure-provisioning surface. Tenant Onboarding is likewise not applicable (see RBAC / Tenancy).
 
 ## Terminology
 
-- **Bot role** — one of the four groups this design tracks separately: `bug_fix_flow` (`jira-ai-issue-solver`), `planning_generation` (`prd-creator`/`design-creator`), `planning_review` (EP Review Bot via `agent-eval-harness`), and `implementation` (code-stage bot; currently unattributed — see Motivation).
+- **Bot role** — one of the four groups this design tracks separately: `bug_fix_flow` (`jira-ai-issue-solver`), `planning_generation` (no production bot today — see Motivation), `planning_review` (EP Review Bot via `agent-eval-harness`), and `implementation` (code-stage bot; currently unattributed — see Motivation).
 - **Bot Metric Record** — the canonical per-record shape every extended fetcher emits (see Implementation Details), grouping fields by concern: `botIdentity`, `cost`, `reliability`, `ci`, `judgeAgreement`, `continuousImprovement`.
 - **`state`** — a per-field-group status flag that is never absent, always one of: `reported` (real data present), `not_yet_reported` (upstream hasn't started emitting this yet), `unattributed` (identity-specific — the record exists but which bot/model produced it is unknown), or `building_baseline` (data exists but sample size is below the minimum for a reliable trend).
 
@@ -57,18 +59,19 @@ A live `jira` CLI query run during this design (2026-07-30) also found zero Jira
 This design adds three fetcher-side extensions, one new shared config file, and two dashboard pages, all inside systems OSAC already operates:
 
 1. **Bug Fix Flow extension** — `fetch-autofix.py` gains PR-comment reading (a capability it does not have today) to parse the cost/status comments `jira-ai-issue-solver` already posts.
-2. **Planning-generation extension** — the shared `provenance.py` marker schema gains optional cost/duration/model fields; `fetch-ep-review.py`'s existing generic JSON parse of that marker picks them up with zero fetcher-code changes once `ai-skills` starts emitting them.
+2. **Planning-generation extension** — the shared `provenance.py` marker schema gains optional cost/duration/model fields; `fetch-ep-review.py`'s existing generic JSON parse of that marker picks them up with zero fetcher-code changes once a production Planning-generation bot starts emitting them. No such bot exists today (see Motivation) — this extension is plumbing built ahead of need, the same posture as the Implementation-stage role.
 3. **Planning-review extension** — a new adapter script fills the currently-empty gap between `evals/review/`'s harness output and `evals/lib/unified-report.schema.yaml`'s already-reserved Org Pulse feed, computing judge/human agreement (Cohen's κ), false-pass/false-fail rate, and surfacing human-override rate (derivable today with zero new upstream emission).
 4. **`bot-roles.yaml`** — a new declarative config in `org-pulse-data` mapping known bot identities to one of the four role-scope groups, read by all fetchers and re-exported as its own small JSON for the frontend selector.
 5. **Two Org Pulse dashboard pages** — added as new tabs within the existing "AI Impact" module, not new platform modules, per `docs/MODULES.md`'s existing per-module data-route pattern.
 
 ```mermaid
 flowchart TB
-    subgraph Bots["Three production bot systems (unchanged internally)"]
+    subgraph Bots["Two production bot/harness systems today (unchanged internally)"]
         BF["jira-ai-issue-solver<br/>(Bug Fix Flow)"]
-        PG["ai-skills prd-creator/design-creator<br/>(Planning: generation)"]
         RV["agent-eval-harness via evals/review/<br/>(Planning: review calibration)"]
     end
+
+    PG["Planning-generation bot<br/>(none in production today - see Motivation)"]
 
     subgraph OPD["edge-infrastructure/org-pulse-data (extended)"]
         FA["fetch-autofix.py<br/>+ PR-comment parsing"]
@@ -83,7 +86,7 @@ flowchart TB
     end
 
     BF -->|"PR comments:<br/>AI-BOT-COST, AI-BOT-STATUS"| FA
-    PG -->|"provenance.py capture<br/>--cost-usd --duration-seconds --model"| PV
+    PG -.->|"provenance.py capture<br/>--cost-usd --duration-seconds --model<br/>(once a production bot exists)"| PV
     PV -->|"marker embedded in<br/>committed prd.md/design.md"| FE
     RV --> AD
     AD --> FS
@@ -100,7 +103,7 @@ flowchart TB
     ORG --> P2["Feature Development Flow Evaluation page"]
 ```
 
-The diagram shows the full path from each bot system to the two dashboard pages. Nothing left of `org-pulse-data` changes its own architecture — `jira-ai-issue-solver` keeps posting the same comments, `ai-skills` keeps calling the same shared script, `agent-eval-harness` keeps running the same script chain. Everything this design adds sits in the three repos OSAC already owns and already schedules: `org-pulse-data`'s fetchers, this workspace's `provenance.py`/`evals/lib`, and Org Pulse's existing AI Impact module.
+The diagram shows the full path from each bot/harness system to the two dashboard pages, including the Planning-generation path (dashed) this design builds ahead of there being a bot to use it. Nothing left of `org-pulse-data` changes its own architecture — `jira-ai-issue-solver` keeps posting the same comments, `agent-eval-harness` keeps running the same script chain, and whichever bot eventually fills the Planning-generation role only needs to start calling a shared script this workspace already owns. Everything this design adds sits in repos OSAC already owns and already schedules: `org-pulse-data`'s fetchers, this workspace's `provenance.py`/`evals/lib`, and Org Pulse's existing AI Impact module.
 
 ### Workflow Description
 
@@ -163,19 +166,19 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant Skill as ai-skills prd-creator/design-creator
+    participant Skill as Planning-generation bot (no production instance today)
     participant PV as provenance.py capture
     participant Doc as committed prd.md/design.md
     participant FE as fetch-ep-review.py
 
-    Skill->>PV: capture --workflow prd --phase draft --cost-usd 2.14 --duration-seconds 480 --model claude-sonnet-4-6
+    Skill->>PV: capture --workflow prd --phase draft --cost-usd 2.14 --duration-seconds 480 --model <model-name>
     PV->>Doc: render
     FE->>Doc: fetch_file_content(prd.md, ref)
     FE->>FE: detect_provenance(content) - generic json.loads, unchanged code
     FE-->>FE: new fields already present in parsed dict
 ```
 
-`detect_provenance()` already does a generic `json.loads()` on the whole marker blob `[Codebase: fetch-ep-review.py:377-386]` — no fetcher code change is needed once the marker itself carries the new fields. The only real work is upstream: `provenance.py`'s `capture` subcommand gains three new optional flags, and `ai-skills`'s publish step (which already calls this exact script) passes them.
+`detect_provenance()` already does a generic `json.loads()` on the whole marker blob `[Codebase: fetch-ep-review.py:377-386]` — no fetcher code change is needed once the marker itself carries the new fields. The only real work is upstream: `provenance.py`'s `capture` subcommand gains three new optional flags, for whichever bot eventually becomes OSAC's production Planning-generation system to pass (see Motivation — none does today).
 
 #### Planning-review: eval-summary extraction
 
@@ -195,7 +198,7 @@ sequenceDiagram
     FS->>FS: emit judge/human agreement metrics
 ```
 
-This path has a real prerequisite gap: OSAC-2264 (judges/thresholds, still `TBD` in both eval YAMLs) and populated golden cases (`cases/prd/`, `cases/design/` are currently empty placeholders) must land before κ/FPR/FNR have anything to compute from. This design defines the contract those efforts write into; it does not shortcut them (see Non-Goals).
+This path has a real prerequisite gap: harness judges/thresholds (still `TBD` in both eval YAMLs) and populated golden cases (`cases/prd/`, `cases/design/` are currently empty placeholders) must land before κ/FPR/FNR have anything to compute from. This design defines the contract those efforts write into; it does not shortcut them (see Non-Goals).
 
 #### DevOps Engineer viewing a dashboard
 
@@ -224,9 +227,9 @@ Every extended fetcher emits records shaped around the same conceptual fields, s
 | `judgeAgreement` (Planning-review only) | `kappa`, `falsePassRate`, `falseNegativeRate`, `nGoldenCases` | `reported`, `not_yet_reported` (harness/cases not yet configured) |
 | `continuousImprovement` | `executionTraceCaptured` (bool), `humanOverrideCaptured` (bool) | `reported`, `not_yet_reported` |
 
-`reliability.retryCount`'s meaning is role-specific: for Bug Fix Flow and Implementation it is retries within `jira-ai-issue-solver`'s feedback-round cost entries; for Planning-generation it is the count of `ai-skills`' own REASSESS/FIXUP revision cycles before merge — directly answering the Product Owner's "does an autonomously generated PRD/design need fewer revision cycles" user story. `[Research: Domain 2]` notes this cycle count exists internally in `ai-skills`' state machine today but is not yet externally exposed as a count — closing this is the same kind of upstream ask as Planning-generation's cost/duration fields, and should be added via the same `provenance.py capture` flag extension (`--revision-count`) rather than a separate mechanism.
+`reliability.retryCount`'s meaning is role-specific: for Bug Fix Flow and Implementation it is retries within `jira-ai-issue-solver`'s feedback-round cost entries; for Planning-generation it is intended to be the count of REASSESS/FIXUP revision cycles before merge — a concept OSAC-3168's own pipeline design already names (`FETCH → GENERATE → ASSESS → REVIEW → REVISE → FIXUP → REASSESS → REPORT`) — directly answering the Product Owner's "does an autonomously generated PRD/design need fewer revision cycles" user story. `[Research: Domain 2]` found this cycle count already tracked internally in the current proof-of-concept's (`eranco74/ai-skills`) state machine but not yet externally exposed as a count; whichever bot becomes the production implementation of that pipeline should expose it the same way, via the same `provenance.py capture` flag extension (`--revision-count`) rather than a separate mechanism.
 
-`continuousImprovement` answers the DevOps Engineer's user story on whether execution traces and human-override signals are being captured *completely* — it is a completeness indicator, not the traces themselves (raw traces are never displayed on the dashboard; Predictive/closed-loop use of them is explicitly out of the PRD's scope). `humanOverrideCaptured` is `true` today for Bug Fix Flow (the existing `jira-triage-human-assigned` label already signals a human took over `[Codebase: fetch-autofix.py:74-75]`) and for Planning-review (human-override-rate, described below). It is `not_yet_reported` for Planning-generation until a human-edit-before-merge signal is added (e.g., diffing the bot's initial commit against the merged PR). `executionTraceCaptured` is `reported` only for Planning-review today — `agent-eval-harness` already writes per-case traces (`traces: {stdout, stderr, metrics}` in both eval YAMLs `[Codebase: evals/review/eval-prd-review.yaml:53-56]`). Whether `jira-ai-issue-solver` or `ai-skills` retain any durable execution trace beyond their ephemeral run environment is **not confirmed** by this design's research — flagged as a Risk below rather than assumed either way.
+`continuousImprovement` answers the DevOps Engineer's user story on whether execution traces and human-override signals are being captured *completely* — it is a completeness indicator, not the traces themselves (raw traces are never displayed on the dashboard; Predictive/closed-loop use of them is explicitly out of the PRD's scope). `humanOverrideCaptured` is `true` today for Bug Fix Flow (the existing `jira-triage-human-assigned` label already signals a human took over `[Codebase: fetch-autofix.py:74-75]`) and for Planning-review (human-override-rate, described below). It is `not_yet_reported` for Planning-generation, both because no production bot exists yet and because it would additionally need a human-edit-before-merge signal (e.g., diffing the bot's initial commit against the merged PR) once one does. `executionTraceCaptured` is `reported` only for Planning-review today — `agent-eval-harness` already writes per-case traces (`traces: {stdout, stderr, metrics}` in both eval YAMLs `[Codebase: evals/review/eval-prd-review.yaml:53-56]`). Whether `jira-ai-issue-solver` retains any durable execution trace beyond its ephemeral run environment is **not confirmed** by this design's research — flagged as a Risk below rather than assumed either way. Planning-generation's `executionTraceCaptured` starts `not_yet_reported` by default, since no production bot exists to have a trace-retention policy at all.
 
 `state` is never absent — a group with no data still appears with `state: not_yet_reported` (or the group-appropriate equivalent) and null values, satisfying `[Locked: D3]` at the schema level rather than leaving it to frontend inference. Example, a Bug Fix Flow record today, before bot-identity instrumentation lands:
 
@@ -253,18 +256,14 @@ roles:
   bug_fix_flow:
     - id: jira-ai-issue-solver
       match: { source: fetch-autofix }
-  planning_generation:
-    - id: prd-creator
-      match: { source: fetch-ep-review, provenance_field: workflow, value: prd }
-    - id: design-creator
-      match: { source: fetch-ep-review, provenance_field: workflow, value: design }
+  planning_generation: []  # no production bot attributed yet - see Motivation
   planning_review:
     - id: ep-review-bot
       match: { source: fetch-eval-summary }
   implementation: []  # no bot attributed yet - see Motivation
 ```
 
-Adding a bot to an existing role, or populating the currently-empty `implementation` list once a bot starts processing Task-type issues, is a one-line config change — no fetcher or frontend code changes. This directly satisfies Goal 5.
+Adding a bot to an existing role, or populating either currently-empty list (`planning_generation` once a production bot exists, `implementation` once a bot starts processing Task-type issues), is a one-line config change — no fetcher or frontend code changes. This directly satisfies Goal 5.
 
 ### Bug Fix Flow extension (`fetch-autofix.py`)
 
@@ -278,9 +277,9 @@ Three additive changes, in order of confidence:
 
 ### Planning-generation extension (`provenance.py`)
 
-`provenance.py`'s `capture` subcommand gains three new optional CLI flags — `--cost-usd`, `--duration-seconds`, `--model` — persisted as new optional keys on the existing event object in `provenance.json`'s `schema_version` (bumped to 2, additive: old logs without these keys remain valid) and carried through to the rendered `<!-- ai-workflow-provenance:{...} -->` footer. Because `eranco74/ai-skills` already calls this exact shared script for its own publish step `[Research: Domain 2]`, and because `fetch-ep-review.py`'s `detect_provenance()` already does a generic `json.loads()` of the whole marker (not a fixed-field parse) `[Codebase: fetch-ep-review.py:377-386]`, this is the lowest-risk extension in the design: one shared file changes once, and the fetcher needs zero changes to start surfacing the new fields once `ai-skills` starts passing them.
+`provenance.py`'s `capture` subcommand gains three new optional CLI flags — `--cost-usd`, `--duration-seconds`, `--model` — persisted as new optional keys on the existing event object in `provenance.json`'s `schema_version` (bumped to 2, additive: old logs without these keys remain valid) and carried through to the rendered `<!-- ai-workflow-provenance:{...} -->` footer. `fetch-ep-review.py`'s `detect_provenance()` already does a generic `json.loads()` of the whole marker (not a fixed-field parse) `[Codebase: fetch-ep-review.py:377-386]`, so this is the lowest-risk extension in the design regardless of which bot eventually populates it: one shared file changes once, and the fetcher needs zero changes to start surfacing the new fields once a production Planning-generation bot starts passing them. `eranco74/ai-skills` — a personal proof-of-concept for OSAC-3168's `prd-creator`/`design-creator`, not a deployed OSAC system — already calls this exact shared script for its own publish step `[Research: Domain 2]`, which is useful only as evidence the pattern is viable, not as a commitment this design is extending that specific repo.
 
-This workspace's own manual `/prd:draft`/`/design:draft` skill invocations could optionally start passing the same flags (Claude Code CLI session cost is available to the calling skill) — this is a nice-to-have, not required by any locked decision, since the PRD's Dependencies section names OSAC-3168's workstream as the one that must emit this data, not this workspace's own manual authoring sessions.
+This workspace's own manual `/prd:draft`/`/design:draft` skill invocations could optionally start passing the same flags (Claude Code CLI session cost is available to the calling skill) — this is a nice-to-have, not required by any locked decision. Whichever bot eventually becomes OSAC's production Planning-generation system is the one that must emit this data for that role's dashboard section to leave "building baseline."
 
 ### Planning-review extension (`evals/` adapter + `fetch-eval-summary.py`)
 
@@ -297,7 +296,7 @@ This workspace's own manual `/prd:draft`/`/design:draft` skill invocations could
 
 2. **New adapter script** (`evals/lib/generate-unified-report.py`) reads a completed harness run's per-case verdicts from `evals/review/results/{run_id}/` and each case's `annotations.yaml` `expected_verdict` (ground truth), computes κ/FPR/FNR across the run's cases, reads OSAC-516's `osac-bugfix-eval` `summary.yaml`/`run_result.json` per the contract `evals/lib/bugfix-ingest.md` already documents, and writes the combined report. A small, **not gitignored** rollup — `evals/results/latest/summary.json`, overwritten each run rather than the full per-run history under `evals/results/{run_id}/` — is committed to `osac-workspace` so `org-pulse-data` can read it.
 3. **`fetch-eval-summary.py`** (new, sibling to the two existing fetchers rather than folded into `fetch-ep-review.py`, since it reads golden-set calibration output, not live PR reviews) fetches `evals/results/latest/summary.json` via `gh api repos/osac-project/osac-workspace/contents/evals/results/latest/summary.json` — the identical `gh api .../contents/...` pattern `fetch-ep-review.py`'s `fetch_file_content()` already uses, just against this workspace's repo instead of `enhancement-proposals`.
-4. **Human-override rate — no new upstream emission needed.** `fetch-ep-review.py`'s existing output already carries `humanReviewStatus`, `recommendation`, and PR merge state `[Codebase: fetch-ep-review.py build_feature_entry/build_index_entry]`. Computing "how often did a human's outcome disagree with the bot's PASS/FAIL recommendation" is new aggregation logic inside the existing fetcher, not a new data source — this is the one Planning-review Key Metric available immediately, independent of the OSAC-2264/golden-case sequencing dependency above.
+4. **Human-override rate — no new upstream emission needed.** `fetch-ep-review.py`'s existing output already carries `humanReviewStatus`, `recommendation`, and PR merge state `[Codebase: fetch-ep-review.py build_feature_entry/build_index_entry]`. Computing "how often did a human's outcome disagree with the bot's PASS/FAIL recommendation" is new aggregation logic inside the existing fetcher, not a new data source — this is the one Planning-review Key Metric available immediately, independent of the harness-judges/golden-case sequencing dependency above.
 5. **Review-rationale trace completeness** is likewise computable today, directly from harness output structure: whether `artifacts/review-output.md` exists and is non-empty for a given case run — no new emission required.
 6. **Cost per review** depends on whether `agent-eval-harness`'s already-configured `traces.metrics: true` (set in both `eval-prd-review.yaml` and `eval-design-review.yaml` today `[Codebase: evals/review/eval-prd-review.yaml:53-56]`) already captures per-case cost the way bugfix's `run_result.json` does. This design assumes it does and reads it accordingly; if it doesn't, that is a gap in `agent-eval-harness` itself, external to this design, tracked as Open Question 2.
 
@@ -346,16 +345,16 @@ This design adds no long-running service and therefore no Prometheus metrics or 
 | Risk | Mitigation |
 |---|---|
 | PR-comment/markdown-table parsing is string-based, not schema-versioned — `jira-ai-issue-solver`'s own `parseCostComment()` round-trips by string parsing, not JSON `[Research: Integration Constraints]` | Defensive parsing returns `not_yet_reported` rather than crashing on drift (see Failure Handling); if drift becomes frequent, propose a JSON sibling marker to that repo as a follow-up, not a day-one requirement |
-| Model/bot identity emission for Bug Fix Flow and Planning-generation requires upstream changes to two repos this design does not own | `[Locked: D3]`'s "building baseline" states let both dashboard pages ship before either upstream change lands; Bug Fix Flow is sequenced first per research's own recommendation (lowest lift — cost/retry already flow, only identity is missing) |
-| Self-preference bias: if the EP Review Bot's judge model ever matches `prd-creator`/`design-creator`'s generation model, Cohen's κ may read artificially high (inflated false-pass rate on self-generated content) `[Research: Standards and Specifications]` | Display which model is running the judge alongside κ on the dashboard tile itself, so a Lead Engineer can see potential overlap rather than trusting κ blindly |
+| Model/bot identity emission for Bug Fix Flow requires an upstream change to a repo this design does not own; Planning-generation has no production bot to make that ask of at all | `[Locked: D3]`'s "building baseline" states let both dashboard pages ship regardless; Bug Fix Flow is sequenced first per research's own recommendation (lowest lift — cost/retry already flow, only identity is missing), while Planning-generation stays at zero attributed bots until a real production bot exists |
+| Self-preference bias: if the EP Review Bot's judge model ever matches a future Planning-generation bot's generation model, Cohen's κ may read artificially high (inflated false-pass rate on self-generated content) `[Research: Standards and Specifications]` | Display which model is running the judge alongside κ on the dashboard tile itself, so a Lead Engineer can see potential overlap rather than trusting κ blindly |
 | Small-N statistical unreliability: 10 PRD / 6 design golden cases are below the N≈50 floor where bootstrap confidence intervals for κ are considered valid `[Research: Standards and Specifications]` | κ is presented as a directional, small-sample-caveated estimate using the same "building baseline (X/N)" pattern as other under-sampled metrics, never as a pass/fail gate |
-| Planning-review's calibration mechanics (judges, thresholds, golden cases) are not yet configured — a sequencing dependency this design cannot shortcut | Human-override rate and review-rationale-trace-completeness ship immediately (zero new upstream emission needed); κ/FPR/FNR wait on OSAC-2264/OSAC-2267 and show `not_yet_reported` until then |
+| Planning-review's calibration mechanics (judges, thresholds, golden cases) are not yet configured — a sequencing dependency this design cannot shortcut | Human-override rate and review-rationale-trace-completeness ship immediately (zero new upstream emission needed); κ/FPR/FNR wait on that harness-configuration and baseline-eval work landing and show `not_yet_reported` until then |
 | Implementation-stage role group has no confirmed bot in production today (empirically verified via live Jira query) | `bot-roles.yaml` ships with an empty `implementation` list; the role's dashboard sub-section renders the same "building baseline, zero bots" state the framework already handles for under-sampled data, not a special case |
-| Whether `jira-ai-issue-solver` or `ai-skills` retain any durable execution trace beyond their ephemeral run environment is unconfirmed by this design's research | `continuousImprovement.executionTraceCaptured` starts `not_yet_reported` for those two roles rather than assuming completeness; if traces genuinely aren't retained anywhere, that becomes a scoped follow-up ask to each bot's owning workstream, not a silent gap in this dashboard |
+| Whether `jira-ai-issue-solver` retains any durable execution trace beyond its ephemeral run environment is unconfirmed by this design's research | `continuousImprovement.executionTraceCaptured` starts `not_yet_reported` rather than assuming completeness; if traces genuinely aren't retained anywhere, that becomes a scoped follow-up ask to that bot's owning workstream, not a silent gap in this dashboard |
 
 ## Drawbacks
 
-This design adds Python surface area to a repo (`org-pulse-data`) whose CI this workspace does not control, and asks for changes in two more external repos (`jira-ai-issue-solver`'s deployment/fork, `eranco74/ai-skills`) that no single owner here can force onto a timeline — Bug Fix Flow and Planning-generation's identity/cost gaps close only when those teams act, not when this design ships. String-based PR-comment parsing is inherently more brittle than a real schema or API, accepted here because it reuses a mechanism the bots themselves already treat as durable (`jira-ai-issue-solver`'s own code round-trips its cost comment the same way). The four-role framework is also not fully elastic: the PRD fixes two dashboard pages with a defined selector-group structure per page, so a genuinely new fifth role (not just a new bot within an existing role) would need a page-layout change, not just a `bot-roles.yaml` edit.
+This design adds Python surface area to a repo (`org-pulse-data`) whose CI this workspace does not control, and asks for a change in one more external repo this workspace doesn't own (`jira-ai-issue-solver`'s deployment/fork) — Bug Fix Flow's identity gap closes only when that team acts, not when this design ships. Planning-generation's gap is more fundamental: no production bot exists to make an equivalent ask of, so that role's dashboard section may remain at zero attributed bots indefinitely, not just until an owner gets to it. String-based PR-comment parsing is inherently more brittle than a real schema or API, accepted here because it reuses a mechanism the bots themselves already treat as durable (`jira-ai-issue-solver`'s own code round-trips its cost comment the same way). The four-role framework is also not fully elastic: the PRD fixes two dashboard pages with a defined selector-group structure per page, so a genuinely new fifth role (not just a new bot within an existing role) would need a page-layout change, not just a `bot-roles.yaml` edit.
 
 ## Alternatives (Not Implemented)
 
@@ -396,15 +395,15 @@ Should model/bot identity be added as a new row inside the existing `<!-- AI-BOT
 
 Does `traces.metrics: true` (already set in both `eval-prd-review.yaml` and `eval-design-review.yaml`) capture per-case dollar cost for review-skill runs the way `run_result.json` does for bugfix runs, or is this a harness-side gap?
 
-- **Owner:** `evals/review/` harness owners (OSAC-2264 team).
+- **Owner:** `evals/review/` harness owners.
 - **Impact:** Determines whether Planning-review's cost-per-review Key Metric is a read of already-captured data or requires new harness-side instrumentation upstream in `agent-eval-harness` itself.
 
-### 3. Is `eranco74/ai-skills`'s review-skill copy the same as this workspace's?
+### 3. Will OSAC-3168's eventual production bot route through this workspace's review skills or a separate copy?
 
-`eranco74/ai-skills` has its own `skills/prd-review`/`skills/design-review` directories, distinct from this workspace's `.claude/skills/prd-review`/`design-review` `[Research: Domain 2]`. Are these kept in sync, an intentional fork, or does OSAC-3168's autonomous pipeline route through a different mechanism (e.g., a GitHub Action) entirely?
+The current OSAC-3168 proof-of-concept, `eranco74/ai-skills`, has its own `skills/prd-review`/`skills/design-review` directories, distinct from this workspace's `.claude/skills/prd-review`/`design-review` `[Research: Domain 2]` — but that PoC is not itself in scope for this design (see Motivation). Whenever OSAC-3168 produces a production Planning-generation bot, will it route through this workspace's review skills, a synced fork of them, or an independent implementation (e.g., a GitHub Action)?
 
 - **Owner:** OSAC-3168 owner.
-- **Impact:** Determines whether OSAC-3168's autonomously-generated PRDs/designs are covered by the same Cohen's κ calibration this design surfaces, or need a separate calibration track.
+- **Impact:** Determines whether that future bot's autonomously-generated PRDs/designs are covered by the same Cohen's κ calibration this design surfaces, or need a separate calibration track.
 
 ## Test Plan
 
@@ -465,6 +464,6 @@ None. Every component runs on existing GitLab CI runners (`org-pulse-data`), the
 ## Provenance
 
 Authored: revise @ design 0.5.0 - 68284c8, workspace main @ 07cf78f3
-Phases: draft, revise
+Phases: draft, revise, revise
 
-<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"design","workflow_version":"0.5.0","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft","revise"],"authoring_modes":["skill"],"context_changed":false} -->
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"design","workflow_version":"0.5.0","ai_workflows":"68284c8","source_repo":"07cf78f3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["draft","revise","revise"],"authoring_modes":["skill"],"context_changed":false} -->
