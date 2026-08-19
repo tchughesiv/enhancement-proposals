@@ -279,27 +279,7 @@ All OSAC metering events use CloudEvents 1.0 with the following extension attrib
 
 **Provider Adapter Go Interface:**
 
-```go
-type MeteringEvent struct {
-    CloudEvent cloudevents.Event
-    Topic      string
-    Partition  int32
-    Offset     int64
-}
-
-type SubmitResult struct {
-    ProviderEventID string
-    Idempotent      bool
-}
-
-type ProviderAdapter interface {
-    Name() string
-    Submit(ctx context.Context, event MeteringEvent) error
-    Flush(ctx context.Context) (SubmitResult, error)
-    HealthCheck(ctx context.Context) error
-    Close() error
-}
-```
+A provider adapter must satisfy the `ProviderAdapter` contract the framework depends on — plain data carried between the framework and the adapter uses two structs, `MeteringEvent` (`CloudEvent cloudevents.Event`, `Topic string`, `Partition int32`, `Offset int64`) and `SubmitResult` (`ProviderEventID string`, `Idempotent bool`) — and the adapter itself implements five behaviors: `Name` returns the provider's label, used as a Prometheus metric tag; `Submit` takes a context and a `MeteringEvent` and processes a single event, returning an error; `Flush` takes a context and uploads any buffered events, returning a `SubmitResult` and an error; `HealthCheck` takes a context and verifies connectivity to the provider, returning an error; and `Close`, taking no arguments, releases resources after the final flush, returning an error.
 
 The framework calls `Submit()` per event — the adapter may process it immediately or buffer internally. `Flush()` is called periodically (configurable interval, default 10s) and on graceful shutdown. Kafka consumer offsets are committed only after a successful `Flush()`, not after each `Submit()`. This supports both per-event providers (OpenMeter: `Submit` forwards immediately, `Flush` is a no-op) and batch providers (Cost Management: `Submit` buffers, `Flush` uploads the batch and returns the result).
 
@@ -576,16 +556,9 @@ The Watch Consumer and Reconciliation Loop both write to the State Projection. C
 
 #### Reconciliation Algorithm
 
-1. Paginate all resources via fulfillment List APIs (500/page), accumulating a `resource_id → (current_state, fulfillment_version, billing_dimensions)` map. Only the map keys and lightweight state are retained — full resource payloads are discarded after each page. At 100K resources, the map is approximately 50 MB.
-2. Load the State Projection's `resource_id → (current_state, billing_dimensions)` map in a single query
-3. For each resource in fulfillment:
-   - **Not in projection:** emit `correction.v1` with `reason=missed_creation`; upsert
-   - **State mismatch:** emit `correction.v1` with `reason=state_drift`; update
-   - **Billing dimensions mismatch (same state):** emit `correction.v1` with `reason=billing_dimensions_drift`; close the prior billing interval and reopen with corrected dimensions; update
-   - **Stale heartbeat (> 120s while billable):** emit synthetic heartbeat
-4. For each resource in projection not in fulfillment: emit `correction.v1` with `reason=missed_deletion`; mark deleted
+The reconciler builds its view of fulfillment state by paginating all resources via the fulfillment List APIs (500 per page), accumulating a `resource_id → (current_state, fulfillment_version, billing_dimensions)` map; only the map keys and lightweight state are retained, with full resource payloads discarded after each page, so at 100K resources the map is roughly 50 MB. It then loads the State Projection's own `resource_id → (current_state, billing_dimensions)` map in a single query for comparison. For each resource present in fulfillment, the reconciler emits a `correction.v1` event and upserts the projection when the resource is missing from the projection entirely (`reason=missed_creation`), when the current state differs from the projection's (`reason=state_drift`), or when the state matches but the billing dimensions differ (`reason=billing_dimensions_drift` — closing the prior billing interval and reopening it with the corrected dimensions); a resource that has gone stale on its heartbeat (no heartbeat for more than 120 seconds while still billable) gets a synthetic heartbeat emitted instead of a correction. For each resource present in the projection but absent from fulfillment, the reconciler emits a `correction.v1` event with `reason=missed_deletion` and marks the projection record deleted.
 
-The reconciler compares `fulfillment_version` to reject stale updates. Corrections are published to `osac.metering.corrections`, not `osac.metering.lifecycle`, so adapters can distinguish primary events from adjustments.
+Throughout, the reconciler compares `fulfillment_version` to reject stale updates. Corrections are published to `osac.metering.corrections`, not `osac.metering.lifecycle`, so adapters can distinguish primary events from adjustments.
 
 #### Reliability
 
